@@ -1,0 +1,19 @@
+{
+  "name": "fray",
+  "version": "0.0.0",
+  "description": "A New Platform for Creatives & Developers",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tjedited/Fray-V0.0.0.git"
+  },
+  "author": "Trenton J Waller",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/tjedited/Fray-V0.0.0/issues"
+  },
+  "homepage": "https://github.com/tjedited/Fray-V0.0.0#readme"
+}
