@@ -2,9 +2,9 @@
   "name": "fray",
   "version": "0.0.0",
   "description": "A New Platform for Creatives & Developers",
-  "main": "index.js",
+  "main": "main.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "electron ."
   },
   "repository": {
     "type": "git",
@@ -15,5 +15,8 @@
   "bugs": {
     "url": "https://github.com/tjedited/Fray-V0.0.0/issues"
   },
-  "homepage": "https://github.com/tjedited/Fray-V0.0.0#readme"
+  "homepage": "https://github.com/tjedited/Fray-V0.0.0#readme",
+  "devDependencies": {
+    "electron": "^39.1.1"
+  }
 }

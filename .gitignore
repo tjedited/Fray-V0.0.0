@@ -1,0 +1,39 @@
+# Node.js dependencies
+node_modules/
+
+# Build artifacts
+dist/
+out/
+build/
+release/
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+tmp/
+.temp/
+
+# IDE and editor files (examples)
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Electron specific files
+# Cache directories
+.electron-builder/
+.electron-updater/
+electron-packager/
+
+# Installer files
+*.dmg
+*.exe
+*.AppImage
+*.deb
+*.rpm
