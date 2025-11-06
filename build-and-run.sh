@@ -24,5 +24,6 @@ g++ Engine/main.cpp -o "$OUT_BIN"
 
 echo "Build complete: $OUT_BIN"
 
-# Run the executable
-"$OUT_BIN" one two three
+# Run Electron app
+cd Electron
+npm run start
