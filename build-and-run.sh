@@ -6,7 +6,7 @@ echo "Starting cross-platform script..."
 
 # Detect the operating system
 if [[ "$(uname)" == "Darwin" ]]; then
-    OUT_DIR="Engine/build/mac"
+    OUT_DIR="Engine/build/Darwin"
     OUT_BIN="$OUT_DIR/main"
 elif [[ "$(uname)" == "Linux" ]]; then
     # Note: WSL identifies as Linux
