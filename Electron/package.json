@@ -19,9 +19,14 @@
   },
   "homepage": "https://github.com/tjedited/Fray-V0.0.0#readme",
   "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.0",
     "concurrently": "^8.2.2",
     "electron": "^39.1.1",
     "vite": "^6.4.1",
     "wait-on": "^9.0.1"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   }
 }
