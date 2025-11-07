@@ -11,7 +11,7 @@ const createWindow = () => {
     }
   })
 
-  win.loadFile('index.html');
+  win.loadURL('http://localhost:5173');
 }
 
 app.whenReady().then(() => {

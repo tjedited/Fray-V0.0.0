@@ -4,7 +4,9 @@
   "description": "A New Platform for Creatives & Developers",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "vite": "vite",
+    "electron": "electron .",
+    "start": "concurrently --kill-others \"npm run vite\" \"npm run electron\""
   },
   "repository": {
     "type": "git",
@@ -17,6 +19,8 @@
   },
   "homepage": "https://github.com/tjedited/Fray-V0.0.0#readme",
   "devDependencies": {
-    "electron": "^39.1.1"
+    "concurrently": "^8.2.2",
+    "electron": "^39.1.1",
+    "vite": "^6.4.1"
   }
 }
