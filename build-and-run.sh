@@ -5,15 +5,15 @@
 echo "Starting cross-platform script..."
 
 # Detect the operating system
-if [[ "$(uname)" == "Darwin" ]]; then
+UNAME_OUT="$(uname)"
+if [[ "$UNAME_OUT" == "Darwin" ]]; then
     OUT_DIR="Engine/build/Darwin"
     OUT_BIN="$OUT_DIR/main"
-elif [[ "$(uname)" == "Linux" ]]; then
-    # Note: WSL identifies as Linux
+elif [[ "$UNAME_OUT" == MINGW* || "$UNAME_OUT" == MSYS* || "$UNAME_OUT" == CYGWIN* ]]; then
     OUT_DIR="Engine/build/Windows"
     OUT_BIN="$OUT_DIR/main.exe"
 else
-    echo "Unsupported OS: $(uname)"
+    echo "Unsupported OS: $UNAME_OUT"
     exit 1
 fi
 
