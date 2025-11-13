@@ -6,7 +6,5 @@
 #include <cstdio>
 
 #include "fray/fray.hpp"
-#include "log/log.hpp"
-#include "ipc/ipc.hpp"
 
 #endif

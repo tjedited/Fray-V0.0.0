@@ -5,6 +5,8 @@
 
 #include "types.hpp"
 #include "errors.hpp"
+#include "log.hpp"
+#include "ipc.hpp"
 
 #define PROCESS_ID "Fray Engine"
 #define VERSION_MAJOR 0

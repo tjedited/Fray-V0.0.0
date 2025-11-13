@@ -16,6 +16,7 @@
 
 // Basic types
 typedef void            F_void;
+typedef bool            F_bool;
 typedef char            F_char;
 typedef unsigned char   F_uchar;
 typedef int16_t         F_short;

@@ -9,9 +9,17 @@ cd Engine
 # Detect the operating system
 UNAME_OUT="$(uname)"
 if [[ "$UNAME_OUT" == "Darwin" ]]; then
+    BREW_INCLUDE=/opt/homebrew/include
+    BREW_LIB=/opt/homebrew/lib
+    INCLUDE_FLAGS="-I$BREW_INCLUDE"
+    LIB_FLAGS="-L$BREW_LIB"
     OUT_DIR="build/Darwin"
     OUT_BIN="$OUT_DIR/engine"
 elif [[ "$UNAME_OUT" == MINGW* || "$UNAME_OUT" == MSYS* || "$UNAME_OUT" == CYGWIN* ]]; then
+    VCPKG_INCLUDE="C:/vcpkg/installed/x64-windows/include"
+    VCPKG_LIB="C:/vcpkg/installed/x64-windows/lib"
+    INCLUDE_FLAGS="-I$VCPKG_INCLUDE"
+    LIB_FLAGS="-L$VCPKG_LIB -lws2_32"
     OUT_DIR="build/Windows"
     OUT_BIN="$OUT_DIR/engine.exe"
 else
@@ -21,10 +29,8 @@ fi
 
 mkdir -p "$OUT_DIR"
 
-# Compile main.cpp
-g++ $(find . -name '*.cpp') -o "$OUT_BIN"
-
-echo "Build complete: $OUT_BIN"
+echo "Compiling with: g++ $(find . -name '*.cpp') $INCLUDE_FLAGS $LIB_FLAGS -o $OUT_BIN"
+g++ $(find . -name '*.cpp') $INCLUDE_FLAGS $LIB_FLAGS -o "$OUT_BIN"
 
 # Run Electron app
 cd ../Electron

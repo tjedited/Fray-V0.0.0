@@ -3,6 +3,8 @@
 #ifndef _FRAY_ERRORS_HPP_
 #define _FRAY_ERRORS_HPP_
 
+#include <cstdio>
+
 #include "types.hpp"
 
 typedef F_long F_err;
@@ -25,6 +27,7 @@ namespace fray
     X(FLAG_8, "Flag 8 error.")   \
     X(FLAG_9, "Flag 9 error.")   \
     X(GENERAL, "General error.") \
+    X(NO_MESSAGE_HANDLER, "The TCP server's messageHandlerP has not been set.") \
     X(FAILED_START, "Failed to start the engine process.")
 
         enum code : F_err
@@ -41,12 +44,12 @@ namespace fray
             {
 #define X(name, desc)                                                                                      \
     case code::name:                                                                                       \
-        std::snprintf(buffer, sizeof(buffer), "Error %lld: %s", static_cast<F_longlong>(code::name), desc); \
+        snprintf(buffer, sizeof(buffer), "Error %lld: %s", static_cast<F_longlong>(code::name), desc); \
         return buffer;
                 FRAY_ERROR_LIST
 #undef X
             default:
-                std::snprintf(buffer, sizeof(buffer), "Error %lld: %s", static_cast<F_longlong>(err), "Unknown error.");
+                snprintf(buffer, sizeof(buffer), "Error %lld: %s", static_cast<F_longlong>(err), "Unknown error.");
                 return buffer;
             }
         }
@@ -56,7 +59,7 @@ namespace fray
             return description(static_cast<code>(err));
         }
 
-    } // namespace errors
-} // namespace fray
+    }
+}
 
 #endif

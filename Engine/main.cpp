@@ -1,9 +1,11 @@
 /* main.cpp */
 #include "main.hpp"
 
-F_err messageHandler()
+F_err TCPMessageHandler()
 {
     F_err err = fray::errors::NONE;
+
+    fray::log::engineInfo("Message handler!");
 
     return err;
 }
@@ -20,9 +22,13 @@ F_err main(
 
     fray::log::engineInfo("Starting.");
 
-    fray::ipc::TCPServer mainServer;
+    fray::ipc::IPCManager ipc;
 
-    mainServer.setPort(1234);
+    auto server1 = ipc.createTCPServer(1234);
+    auto server2 = ipc.createTCPServer(2345);
+    auto server3 = ipc.createTCPServer(3456);
+
+    ipc.run();
 
     fray::log::engineInfo("Exiting.");
     return 0;
