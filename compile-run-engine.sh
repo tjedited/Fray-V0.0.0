@@ -1,0 +1,29 @@
+#!/bin/bash
+
+echo "Starting cross-platform script..."
+
+cd Engine
+
+# Detect the operating system
+UNAME_OUT="$(uname)"
+if [[ "$UNAME_OUT" == "Darwin" ]]; then
+    BREW_INCLUDE=/opt/homebrew/include
+    BREW_LIB=/opt/homebrew/lib
+    INCLUDE_FLAGS="-I$BREW_INCLUDE"
+    LIB_FLAGS="-L$BREW_LIB"
+    OUT_DIR="build/Darwin"
+    OUT_BIN="$OUT_DIR/engine"
+elif [[ "$UNAME_OUT" == MINGW* || "$UNAME_OUT" == MSYS* || "$UNAME_OUT" == CYGWIN* ]]; then
+    OUT_DIR="build/Windows"
+    OUT_BIN="$OUT_DIR/engine.exe"
+else
+    echo "Unsupported OS: $UNAME_OUT"
+    exit 1
+fi
+
+mkdir -p "$OUT_DIR"
+
+echo "Compiling with: g++ $(find . -name '*.cpp') $INCLUDE_FLAGS $LIB_FLAGS -o $OUT_BIN"
+g++ $(find . -name '*.cpp') $INCLUDE_FLAGS $LIB_FLAGS -o "$OUT_BIN"
+
+"$OUT_BIN"

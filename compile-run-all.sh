@@ -10,10 +10,10 @@ cd Engine
 UNAME_OUT="$(uname)"
 if [[ "$UNAME_OUT" == "Darwin" ]]; then
     OUT_DIR="build/Darwin"
-    OUT_BIN="$OUT_DIR/main"
+    OUT_BIN="$OUT_DIR/engine"
 elif [[ "$UNAME_OUT" == MINGW* || "$UNAME_OUT" == MSYS* || "$UNAME_OUT" == CYGWIN* ]]; then
     OUT_DIR="build/Windows"
-    OUT_BIN="$OUT_DIR/main.exe"
+    OUT_BIN="$OUT_DIR/engine.exe"
 else
     echo "Unsupported OS: $UNAME_OUT"
     exit 1
@@ -22,7 +22,7 @@ fi
 mkdir -p "$OUT_DIR"
 
 # Compile main.cpp
-g++ main.cpp -o "$OUT_BIN"
+g++ $(find . -name '*.cpp') -o "$OUT_BIN"
 
 echo "Build complete: $OUT_BIN"
 
