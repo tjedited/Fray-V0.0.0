@@ -19,7 +19,7 @@ elif [[ "$UNAME_OUT" == MINGW* || "$UNAME_OUT" == MSYS* || "$UNAME_OUT" == CYGWI
     VCPKG_INCLUDE="C:/vcpkg/installed/x64-windows/include"
     VCPKG_LIB="C:/vcpkg/installed/x64-windows/lib"
     INCLUDE_FLAGS="-I$VCPKG_INCLUDE"
-    LIB_FLAGS="-L$VCPKG_LIB -lws2_32"
+    LIB_FLAGS="-L$VCPKG_LIB -lws2_32 -lmswsock"
     OUT_DIR="build/Windows"
     OUT_BIN="$OUT_DIR/engine.exe"
 else
