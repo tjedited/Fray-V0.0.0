@@ -20,16 +20,19 @@ F_err main(
     for (F_long i = 0; i < argc; i++)
         fray::log::electronInfo(argv[i]);
 
-    fray::log::engineInfo("Starting.");
+    fray::log::engineInfo("Starting Engine.");
 
     fray::ipc::IPCManager ipc;
 
-    auto server1 = ipc.createTCPServer(1234);
-    auto server2 = ipc.createTCPServer(2345);
-    auto server3 = ipc.createTCPServer(3456);
+    // The TCP ownership needs to change here.
+    // IPCManager should be responsible for holding references to servers and trafficing messages between them.
+    // It can also destroy servers if no clients connect within a certain timespan.
+    ipc.createTCPServer(1234);
+    ipc.createTCPServer(2345);
+    ipc.createTCPServer(3456);
 
     ipc.run();
 
-    fray::log::engineInfo("Exiting.");
+    fray::log::engineInfo("Exiting Engine.");
     return 0;
 }

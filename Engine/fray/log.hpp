@@ -16,42 +16,72 @@ namespace fray
 {
     namespace log
     {
-        // Text Styles
+        /// ANSI reset code.
         constexpr const F_char *ANSI_RESET = "\033[0m";
+        /// ANSI bold.
         constexpr const F_char *ANSI_BOLD = "\033[1m";
+        /// ANSI underline.
         constexpr const F_char *ANSI_UNDERLINE = "\033[4m";
+        /// ANSI blink.
         constexpr const F_char *ANSI_BLINK = "\033[5m";
+        /// ANSI inverse.
         constexpr const F_char *ANSI_INVERSE = "\033[7m";
 
-        // Foreground Colors
+        /// ANSI FG black.
         constexpr const F_char *ANSI_FG_BLACK = "\033[30m";
+        /// ANSI FG red.
         constexpr const F_char *ANSI_FG_RED = "\033[31m";
+        /// ANSI FG green.
         constexpr const F_char *ANSI_FG_GREEN = "\033[32m";
+        /// ANSI FG yellow.
         constexpr const F_char *ANSI_FG_YELLOW = "\033[33m";
+        /// ANSI FG blue.
         constexpr const F_char *ANSI_FG_BLUE = "\033[34m";
+        /// ANSI FG magenta.
         constexpr const F_char *ANSI_FG_MAGENTA = "\033[35m";
+        /// ANSI FG cyan.
         constexpr const F_char *ANSI_FG_CYAN = "\033[36m";
+        /// ANSI FG white.
         constexpr const F_char *ANSI_FG_WHITE = "\033[37m";
+        /// ANSI FG orange (256-color).
         constexpr const F_char *ANSI_FG_ORANGE = "\x1b[38;5;208m";
 
-        // Background Colors
+        /// ANSI BG black.
         constexpr const F_char *ANSI_BG_BLACK = "\033[40m";
+        /// ANSI BG red.
         constexpr const F_char *ANSI_BG_RED = "\033[41m";
+        /// ANSI BG green.
         constexpr const F_char *ANSI_BG_GREEN = "\033[42m";
+        /// ANSI BG yellow.
         constexpr const F_char *ANSI_BG_YELLOW = "\033[43m";
+        /// ANSI BG blue.
         constexpr const F_char *ANSI_BG_BLUE = "\033[44m";
+        /// ANSI BG magenta.
         constexpr const F_char *ANSI_BG_MAGENTA = "\033[45m";
+        /// ANSI BG cyan.
         constexpr const F_char *ANSI_BG_CYAN = "\033[46m";
+        /// ANSI BG white.
         constexpr const F_char *ANSI_BG_WHITE = "\033[47m";
+        /// ANSI BG orange (256-color).
         constexpr const F_char *ANSI_BG_ORANGE = "\033[48;5;208m";
 
+        /// Timestamp buffer size.
         constexpr F_long TIMESTAMP_SIZE = 32;
+        /// Timestamp buffer type.
         using TimestampBuffer = F_char[TIMESTAMP_SIZE];
+        /// Date buffer size.
         constexpr F_long DATE_SIZE = 32;
+        /// Date buffer type.
         using dateBuffer = F_char[DATE_SIZE];
+        /// Time buffer size.
         constexpr F_long TIME_SIZE = 32;
+        /// Time buffer type.
         using timeBuffer = F_char[TIME_SIZE];
 
+        /**
+         * @brief Write "[HH:MM:SS:ms] [YY.MM.DD]" into buffer.
+         * @param timestamp Output buffer (>=32 bytes).
+         */
         inline F_void generateTimestamp(F_char *timestamp)
         {
             using namespace std::chrono;
@@ -73,6 +103,10 @@ namespace fray
                 tm.tm_year % 100, tm.tm_mon + 1, tm.tm_mday);
         }
 
+        /**
+         * @brief Write "YY.MM.DD" into buffer.
+         * @param date Output buffer (>=32 bytes).
+         */
         inline F_void getDate(F_char *date)
         {
             using namespace std::chrono;
@@ -90,6 +124,10 @@ namespace fray
                 tm.tm_year % 100, tm.tm_mon + 1, tm.tm_mday);
         }
 
+        /**
+         * @brief Write "HH:MM:SS.mmmm" into buffer.
+         * @param time Output buffer (>=32 bytes).
+         */
         inline F_void getTime(F_char *time)
         {
             using namespace std::chrono;
@@ -110,6 +148,14 @@ namespace fray
                 static_cast<int>(ms.count()));
         }
 
+        /**
+         * @brief Print a formatted log line with PID, level and colors.
+         * @param PID PID label (e.g., "ENG", "ELC").
+         * @param PIDColor ANSI color for PID.
+         * @param level Level label (e.g., "INF").
+         * @param levelColor ANSI color for level.
+         * @param message Preformatted message text.
+         */
         inline F_void printf(
             const F_char *PID,
             const F_char *PIDColor,
@@ -127,6 +173,15 @@ namespace fray
             std::fflush(stdout);
         }
 
+        /**
+         * @brief vsnprintf wrapper that delegates to printf().
+         * @param PID PID label.
+         * @param PIDColor ANSI color for PID.
+         * @param level Level label.
+         * @param levelColor ANSI color for level.
+         * @param fmt Format string.
+         * @param args va_list of arguments.
+         */
         inline F_void vprintf_helper(
             const F_char *PID,
             const F_char *PIDColor,
@@ -140,6 +195,11 @@ namespace fray
             printf(PID, PIDColor, level, levelColor, message);
         }
 
+        /**
+         * @brief Log info for Electron.
+         * @param fmt Format string.
+         * @param ... Variadic args.
+         */
         inline F_void electronInfo(const F_char *fmt, ...)
         {
             va_list args;
@@ -148,6 +208,11 @@ namespace fray
             va_end(args);
         }
 
+        /**
+         * @brief Log warning for Electron.
+         * @param fmt Format string.
+         * @param ... Variadic args.
+         */
         inline F_void electronWarn(const F_char *fmt, ...)
         {
             va_list args;
@@ -156,6 +221,11 @@ namespace fray
             va_end(args);
         }
 
+        /**
+         * @brief Log error for Electron.
+         * @param fmt Format string.
+         * @param ... Variadic args.
+         */
         inline F_void electronError(const F_char *fmt, ...)
         {
             va_list args;
@@ -164,6 +234,11 @@ namespace fray
             va_end(args);
         }
 
+        /**
+         * @brief Log fatal for Electron.
+         * @param fmt Format string.
+         * @param ... Variadic args.
+         */
         inline F_void electronFatal(const F_char *fmt, ...)
         {
             va_list args;
@@ -172,6 +247,11 @@ namespace fray
             va_end(args);
         }
 
+        /**
+         * @brief Log info for Engine.
+         * @param fmt Format string.
+         * @param ... Variadic args.
+         */
         inline F_void engineInfo(const F_char *fmt, ...)
         {
             va_list args;
@@ -180,6 +260,11 @@ namespace fray
             va_end(args);
         }
 
+        /**
+         * @brief Log warning for Engine.
+         * @param fmt Format string.
+         * @param ... Variadic args.
+         */
         inline F_void engineWarn(const F_char *fmt, ...)
         {
             va_list args;
@@ -188,6 +273,11 @@ namespace fray
             va_end(args);
         }
 
+        /**
+         * @brief Log error for Engine.
+         * @param fmt Format string.
+         * @param ... Variadic args.
+         */
         inline F_void engineError(const F_char *fmt, ...)
         {
             va_list args;
@@ -196,6 +286,11 @@ namespace fray
             va_end(args);
         }
 
+        /**
+         * @brief Log fatal for Engine.
+         * @param fmt Format string.
+         * @param ... Variadic args.
+         */
         inline F_void engineFatal(const F_char *fmt, ...)
         {
             va_list args;
@@ -206,6 +301,10 @@ namespace fray
     }
 }
 
+/**
+ * @brief Evaluate function and return on error.
+ * @param func Expression yielding F_err.
+ */
 #define ERR(func)                                                    \
     do                                                               \
     {                                                                \

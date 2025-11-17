@@ -1,5 +1,4 @@
 /* main.js */
-
 const { app, BrowserWindow } = require('electron')
 const path = require('node:path')
 const { spawn } = require('child_process');
@@ -8,7 +7,7 @@ const { create } = require('node:domain');
 const log = require('./fray/log');
 const { TCPClient } = require('./fray/ipc');
 
-log.electronInfo("Hey this is a quick test %d", 129);
+log.electronInfo("Starting Electron.");
 
 function launchNativeExecutable(launchState) {
   let execPath;
@@ -22,6 +21,7 @@ function launchNativeExecutable(launchState) {
   }
 
   // Spawn the process detached
+  log.electronInfo("Spawning Engine.");
   const child = spawn(
     execPath,
     [launchState],
@@ -50,11 +50,18 @@ const createWindow = () => {
 
 // In Electron main.js
 function waitForEngineAndConnect() {
-    setTimeout(() => {
-        const tcpClient = new TCPClient('127.0.0.1', 1234);
-    }, 1000); // Wait 1 second for engine to start
+  setTimeout(() => {
+    log.electronInfo("Launching TCPClient.");
+    const tcpClient = new TCPClient('127.0.0.1', 1234);
+  }, 500);
 }
 
 app.whenReady().then(() => {
+  log.electronInfo("Showing the window.");
   createWindow()
 })
+
+app.on('window-all-closed', () => {
+  log.electronInfo("Exiting Electron.");
+  app.quit();
+});
