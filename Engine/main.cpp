@@ -1,11 +1,12 @@
 /* main.cpp */
 #include "main.hpp"
 
-F_err TCPMessageHandler()
+F_err TCPMessageHandler(
+    std::string incomingMessage)
 {
     F_err err = fray::errors::NONE;
 
-    fray::log::engineInfo("Message handler!");
+    fray::log::engineInfo("Message handler says, %s", incomingMessage.c_str());
 
     return err;
 }
@@ -27,7 +28,7 @@ F_err main(
     // The TCP ownership needs to change here.
     // IPCManager should be responsible for holding references to servers and trafficing messages between them.
     // It can also destroy servers if no clients connect within a certain timespan.
-    ipc.createTCPServer(1234);
+    ipc.createTCPServer(1234)->setMessageHandler(TCPMessageHandler);
     ipc.createTCPServer(2345);
     ipc.createTCPServer(3456);
 
