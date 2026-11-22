@@ -260,6 +260,11 @@ namespace fray
             va_end(args);
         }
 
+        inline F_void engineInfo(const std::string& message)
+        {
+            printf("ENG", ANSI_FG_BLUE, "INF", ANSI_BG_WHITE, message.c_str());
+        }
+
         /**
          * @brief Log warning for Engine.
          * @param fmt Format string.
@@ -314,6 +319,20 @@ namespace fray
             fray::log::engineError(fray::errors::description(_err)); \
             return _err;                                             \
         }                                                            \
+    } while (0)
+
+/**
+ * @brief Evaluate function and log errors without returning.
+ * @param func Expression yielding F_err.
+ */
+#define ERR2(func)                                                         \
+    do                                                                     \
+    {                                                                      \
+        F_err _err = (func);                                               \
+        if (_err != fray::errors::NONE)                                    \
+        {                                                                  \
+            fray::log::engineWarn("%s", fray::errors::description(_err)); \
+        }                                                                  \
     } while (0)
 
 #endif

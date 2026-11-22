@@ -27,10 +27,12 @@ else
     exit 1
 fi
 
+LIB_FLAGS="$LIB_FLAGS -lsqlite3"
+
 mkdir -p "$OUT_DIR"
 
-echo "Compiling with: g++ $(find . -name '*.cpp') $INCLUDE_FLAGS $LIB_FLAGS -o $OUT_BIN"
-g++ $(find . -name '*.cpp') $INCLUDE_FLAGS $LIB_FLAGS -o "$OUT_BIN"
+echo "Compiling with: g++ -std=c++17 $(find . -name '*.cpp') $INCLUDE_FLAGS $LIB_FLAGS -o $OUT_BIN"
+g++ -std=c++17 $(find . -name '*.cpp') $INCLUDE_FLAGS $LIB_FLAGS -o "$OUT_BIN"
 
 # Run Electron app
 cd ../Electron

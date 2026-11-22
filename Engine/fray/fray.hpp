@@ -6,6 +6,7 @@
 #include "types.hpp"
 #include "errors.hpp"
 #include "log.hpp"
+#include "state_manager.hpp"
 #include "ipc.hpp"
 
 #define PROCESS_ID "Fray Engine"

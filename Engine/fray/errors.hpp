@@ -27,8 +27,20 @@ namespace fray
     X(FLAG_8, "Flag 8 error.")   \
     X(FLAG_9, "Flag 9 error.")   \
     X(GENERAL, "General error.") \
+    X(FAILED_SET_STATE, "Failed to update the state.") \
+    X(INVALID_APPLICATION_ID, "Could not set the state application ID.") \
     X(NO_MESSAGE_HANDLER, "The TCP server's messageHandlerP has not been set.") \
-    X(FAILED_START, "Failed to start the engine process.")
+    X(FAILED_START, "Failed to start the engine process.") \
+    X(FAILED_OPEN_STORE, "Failed to open the store.") \
+    X(FAILED_SAVE_STATE, "Failed to save the state.") \
+    X(FAILED_LOAD_STATE, "Failed to load the state.") \
+    X(STATE_NOT_FOUND, "State key does not exist.") \
+    X(INVALID_STATE_KEY, "The state key is invalid.") \
+    X(STATE_TYPE_MISMATCH, "The state value has a different type.") \
+    X(STATE_VALUE_OUT_OF_RANGE, "The state value is outside the supported range.") \
+    X(FAILED_REMOVE_STATE, "Failed to remove state.") \
+    X(FAILED_CLOSE_STORE, "Failed to close the store.") \
+    X(FAILED_RENAME_STATE_TABLE, "Failed to rename the state table.")
 
         enum code : F_err
         {
