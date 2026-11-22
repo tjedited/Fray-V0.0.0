@@ -17,16 +17,26 @@ F_err main(
 {
     F_err err = fray::errors::NONE;
 
-    // This startup example is temporary and does not persist to disk.
+    fray::files::FileManager project;
+    ERR(project.open("project.fry"));
+
     fray::state::StateManager state;
-    ERR(state.open(":memory:"));
+    fray::state::StateManager test;
+    ERR(state.open(project));
+
     ERR(state.set("application.id", "Fray Test Build 1"));
-    ERR(state.set("engine.version.major", 0));
-    ERR(state.set("engine.version.minor", 0));
-    ERR(state.set("engine.version.bug", 0));
-    ERR(state.set("ui.version.major", 0));
-    ERR(state.set("ui.version.minor", 0));
-    ERR(state.set("ui.version.bug", 0));
+    ERR(state.set("engine.version.major", 1));
+    ERR(state.set("engine.version.minor", 2));
+    ERR(state.set("engine.version.bug", 3));
+
+    ERR(test.open(project, "test"));
+    if (test.remove("app.yoyo") != fray::errors::NONE) {
+        ERR(test.set("app.yoyo", "ma"));
+    }
+
+    ERR(state.set("ui.version.major", 4));
+    ERR(state.set("ui.version.minor", 5));
+    ERR(state.set("ui.version.bug", 6));
 
     F_long uiVersionMajor, uiVersionMinor, uiVersionBug;
     ERR(state.get("ui.version.major", uiVersionMajor));

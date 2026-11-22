@@ -6,6 +6,7 @@
 #include "types.hpp"
 #include "errors.hpp"
 #include "log.hpp"
+#include "file_manager.hpp"
 #include "state_manager.hpp"
 #include "ipc.hpp"
 

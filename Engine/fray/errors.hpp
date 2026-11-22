@@ -40,7 +40,10 @@ namespace fray
     X(STATE_VALUE_OUT_OF_RANGE, "The state value is outside the supported range.") \
     X(FAILED_REMOVE_STATE, "Failed to remove state.") \
     X(FAILED_CLOSE_STORE, "Failed to close the store.") \
-    X(FAILED_RENAME_STATE_TABLE, "Failed to rename the state table.")
+    X(FAILED_RENAME_STATE_TABLE, "Failed to rename the state table.") \
+    X(FAILED_OPEN_PROJECT, "Failed to open the project.") \
+    X(FAILED_SAVE_PROJECT, "Failed to save the project.") \
+    X(FAILED_CLOSE_PROJECT, "Failed to close the project.")
 
         enum code : F_err
         {

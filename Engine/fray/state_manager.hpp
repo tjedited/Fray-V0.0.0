@@ -18,6 +18,7 @@
 #include "types.hpp"
 #include "errors.hpp"
 #include "log.hpp"
+#include "file_manager.hpp"
 
 namespace fray
 {
@@ -34,6 +35,33 @@ namespace fray
                 using Statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
                 sqlite3* _db = nullptr;
                 std::string _table;
+                fray::files::FileManager* _files = nullptr;
+                std::weak_ptr<int> _filesLifetime;
+
+                F_bool saveProject()
+                {
+                    if (_files == nullptr)
+                        return true;
+                    if (_filesLifetime.expired())
+                    {
+                        fray::log::engineError("Cannot save state: its file manager has been destroyed.");
+                        return false;
+                    }
+                    if (_files->save() != fray::errors::NONE)
+                    {
+                        fray::log::engineError("State changed in the working database but could not be saved to the project.");
+                        return false;
+                    }
+                    return true;
+                }
+
+                F_void releaseProject()
+                {
+                    if (_files != nullptr && !_filesLifetime.expired())
+                        _files->detach();
+                    _files = nullptr;
+                    _filesLifetime.reset();
+                }
 
                 static std::string tableName(const std::string& name)
                 {
@@ -317,7 +345,10 @@ namespace fray
                         fray::log::engineError("Failed to save state: %s", error.c_str());
                         return fray::errors::FAILED_SAVE_STATE;
                     }
+                    statement.reset();
                     logSet(key, value);
+                    if (!saveProject())
+                        return fray::errors::FAILED_SAVE_STATE;
                     return fray::errors::NONE;
                 }
 
@@ -433,6 +464,29 @@ namespace fray
                         if (result != SQLITE_OK)
                             fray::log::engineError("Failed to close store: %s", sqlite3_errstr(result));
                     }
+                    releaseProject();
+                }
+
+                F_err open(fray::files::FileManager& files, const std::string& table = "Fray")
+                {
+                    if (!files.isOpen())
+                    {
+                        fray::log::engineError("Cannot open state: project is not open.");
+                        return fray::errors::FAILED_OPEN_STORE;
+                    }
+                    const std::string path = files.databasePath();
+                    const F_err result = open(path.c_str(), table);
+                    if (result != fray::errors::NONE)
+                        return result;
+                    _files = &files;
+                    _filesLifetime = files.lifetime();
+                    files.attach();
+                    if (!saveProject())
+                    {
+                        close();
+                        return fray::errors::FAILED_OPEN_STORE;
+                    }
+                    return fray::errors::NONE;
                 }
 
                 F_err open(const F_char* path, const std::string& table = "Fray")
@@ -507,6 +561,7 @@ namespace fray
                     }
                     _db = nullptr;
                     _table.clear();
+                    releaseProject();
                     return fray::errors::NONE;
                 }
 
@@ -617,6 +672,9 @@ namespace fray
                         fray::log::engineError("State key not found: %s", key.c_str());
                         return fray::errors::STATE_NOT_FOUND;
                     }
+                    statement.reset();
+                    if (!saveProject())
+                        return fray::errors::FAILED_REMOVE_STATE;
                     return fray::errors::NONE;
                 }
 
@@ -641,6 +699,8 @@ namespace fray
                         fray::log::engineError("Failed to remove state table: %s", sqlite3_errmsg(_db));
                         return fray::errors::FAILED_REMOVE_STATE;
                     }
+                    if (!saveProject())
+                        return fray::errors::FAILED_REMOVE_STATE;
                     return fray::errors::NONE;
                 }
 
@@ -676,6 +736,8 @@ namespace fray
                         return fray::errors::FAILED_RENAME_STATE_TABLE;
                     }
                     _table = renamed;
+                    if (!saveProject())
+                        return fray::errors::FAILED_RENAME_STATE_TABLE;
                     return fray::errors::NONE;
                 }
         };
