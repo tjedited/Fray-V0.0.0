@@ -43,7 +43,9 @@ namespace fray
     X(FAILED_RENAME_STATE_TABLE, "Failed to rename the state table.") \
     X(FAILED_OPEN_PROJECT, "Failed to open the project.") \
     X(FAILED_SAVE_PROJECT, "Failed to save the project.") \
-    X(FAILED_CLOSE_PROJECT, "Failed to close the project.")
+    X(FAILED_CLOSE_PROJECT, "Failed to close the project.") \
+    X(PROJECT_CONFLICT, "Both the project archive and working folder exist.") \
+    X(PROJECT_ALREADY_OPEN, "A project with this name is already open.")
 
         enum code : F_err
         {

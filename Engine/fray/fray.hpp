@@ -8,6 +8,8 @@
 #include "log.hpp"
 #include "file_manager.hpp"
 #include "state_manager.hpp"
+#include "project_manager.hpp"
+#include "fray_manager.hpp"
 #include "ipc.hpp"
 
 #define PROCESS_ID "Fray Engine"

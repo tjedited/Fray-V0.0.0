@@ -37,19 +37,14 @@ namespace fray
                 std::string _table;
                 fray::files::FileManager* _files = nullptr;
                 std::weak_ptr<int> _filesLifetime;
+                std::string _projectName;
+                std::string _applicationId;
 
-                F_bool saveProject()
+                F_bool projectAvailable()
                 {
-                    if (_files == nullptr)
-                        return true;
-                    if (_filesLifetime.expired())
+                    if (_files == nullptr || _filesLifetime.expired())
                     {
-                        fray::log::engineError("Cannot save state: its file manager has been destroyed.");
-                        return false;
-                    }
-                    if (_files->save() != fray::errors::NONE)
-                    {
-                        fray::log::engineError("State changed in the working database but could not be saved to the project.");
+                        fray::log::engineError("Cannot access state: its file manager has been destroyed.");
                         return false;
                     }
                     return true;
@@ -61,6 +56,8 @@ namespace fray
                         _files->detach();
                     _files = nullptr;
                     _filesLifetime.reset();
+                    _projectName.clear();
+                    _applicationId.clear();
                 }
 
                 static std::string tableName(const std::string& name)
@@ -268,6 +265,8 @@ namespace fray
                         fray::log::engineError("Cannot save state: store is not open.");
                         return fray::errors::FAILED_SAVE_STATE;
                     }
+                    if (!projectAvailable())
+                        return fray::errors::FAILED_SAVE_STATE;
                     if (!validKey(key))
                         return fray::errors::INVALID_STATE_KEY;
                     if (const auto* real = std::get_if<double>(&value); real != nullptr && !std::isfinite(*real))
@@ -347,8 +346,6 @@ namespace fray
                     }
                     statement.reset();
                     logSet(key, value);
-                    if (!saveProject())
-                        return fray::errors::FAILED_SAVE_STATE;
                     return fray::errors::NONE;
                 }
 
@@ -360,6 +357,8 @@ namespace fray
                         fray::log::engineError("Cannot load state: store is not open.");
                         return fray::errors::FAILED_LOAD_STATE;
                     }
+                    if (!projectAvailable())
+                        return fray::errors::FAILED_LOAD_STATE;
                     if (!validKey(key))
                         return fray::errors::INVALID_STATE_KEY;
                     sqlite3_stmt* raw = nullptr;
@@ -467,37 +466,32 @@ namespace fray
                     releaseProject();
                 }
 
-                F_err open(fray::files::FileManager& files, const std::string& table = "Fray")
+                F_err open(fray::files::FileManager& files, const std::string& table = "Fray",
+                           const std::string& applicationId = "")
                 {
                     if (!files.isOpen())
                     {
                         fray::log::engineError("Cannot open state: project is not open.");
                         return fray::errors::FAILED_OPEN_STORE;
                     }
-                    const std::string path = files.databasePath();
-                    const F_err result = open(path.c_str(), table);
-                    if (result != fray::errors::NONE)
-                        return result;
-                    _files = &files;
-                    _filesLifetime = files.lifetime();
-                    files.attach();
-                    if (!saveProject())
+                    if (_db != nullptr || table.empty() || table.find('\0') != std::string::npos)
                     {
-                        close();
+                        fray::log::engineError("Cannot open store: invalid table or a database is already open.");
                         return fray::errors::FAILED_OPEN_STORE;
                     }
-                    return fray::errors::NONE;
-                }
-
-                F_err open(const F_char* path, const std::string& table = "Fray")
-                {
-                    if (path == nullptr || path[0] == '\0' || _db != nullptr ||
-                        table.empty() || table.find('\0') != std::string::npos)
+                    std::filesystem::path path;
+                    if (files.filePath(files.projectName() + ".sqlite", path) != fray::errors::NONE)
+                        return fray::errors::FAILED_OPEN_STORE;
+                    std::error_code pathError;
+                    const auto status = std::filesystem::symlink_status(path, pathError);
+                    if ((pathError && pathError != std::errc::no_such_file_or_directory) ||
+                        std::filesystem::is_symlink(status))
                     {
-                        fray::log::engineError("Cannot open store: invalid path or table, or a database is already open.");
+                        fray::log::engineError("Cannot open project database: invalid file path.");
                         return fray::errors::FAILED_OPEN_STORE;
                     }
-                    const int result = sqlite3_open(path, &_db);
+                    const std::string filename = path.string();
+                    const int result = sqlite3_open(filename.c_str(), &_db);
                     if (result != SQLITE_OK)
                     {
                         fray::log::engineError("Failed to open store: %s",
@@ -510,23 +504,6 @@ namespace fray
                         fray::log::engineError("Failed to begin store initialization: %s", sqlite3_errmsg(_db));
                         closeAfterOpenFailure();
                         return fray::errors::FAILED_OPEN_STORE;
-                    }
-                    for (const F_char* legacy : {"fray_state", "application_state", "engine_state", "ui_state", "state_values"})
-                    {
-                        F_bool exists;
-                        if (!tableExists(legacy, exists))
-                        {
-                            rollback();
-                            closeAfterOpenFailure();
-                            return fray::errors::FAILED_OPEN_STORE;
-                        }
-                        if (exists)
-                        {
-                            fray::log::engineError("Cannot open store: legacy state table %s is unsupported.", legacy);
-                            rollback();
-                            closeAfterOpenFailure();
-                            return fray::errors::FAILED_OPEN_STORE;
-                        }
                     }
                     const std::string requestedTable = tableName(table);
                     if (!createTable(requestedTable))
@@ -543,8 +520,17 @@ namespace fray
                         return fray::errors::FAILED_OPEN_STORE;
                     }
                     _table = requestedTable;
+                    _files = &files;
+                    _filesLifetime = files.lifetime();
+                    _projectName = files.projectName();
+                    _applicationId = applicationId;
+                    files.attach();
                     return fray::errors::NONE;
                 }
+
+                const std::string& projectName() const { return _projectName; }
+                const std::string& applicationId() const { return _applicationId; }
+                bool isOpen() const { return _db != nullptr; }
 
                 F_err close()
                 {
@@ -599,6 +585,35 @@ namespace fray
                 F_err get(const std::string& key, bool& value) { return read(key, value, 4); }
                 F_err get(const std::string& key, Binary& value) { return read(key, value, 5); }
 
+                F_err contains(const std::string& key, F_bool& exists)
+                {
+                    if (_db == nullptr)
+                    {
+                        fray::log::engineError("Cannot inspect state: store is not open.");
+                        return fray::errors::FAILED_LOAD_STATE;
+                    }
+                    if (!projectAvailable())
+                        return fray::errors::FAILED_LOAD_STATE;
+                    if (!validKey(key))
+                        return fray::errors::INVALID_STATE_KEY;
+                    sqlite3_stmt* raw = nullptr;
+                    const std::string sql = "SELECT 1 FROM " + _table + " WHERE key = ?";
+                    const int prepared = sqlite3_prepare_v2(_db, sql.c_str(), -1, &raw, nullptr);
+                    Statement statement(raw, sqlite3_finalize);
+                    if (prepared != SQLITE_OK)
+                        return statementFailure(statement, "inspect", fray::errors::FAILED_LOAD_STATE);
+                    if (sqlite3_bind_text64(statement.get(), 1, key.data(), key.size(), SQLITE_TRANSIENT, SQLITE_UTF8) != SQLITE_OK)
+                    {
+                        fray::log::engineError("Failed to inspect state: %s", sqlite3_errmsg(_db));
+                        return fray::errors::FAILED_LOAD_STATE;
+                    }
+                    const int result = sqlite3_step(statement.get());
+                    if (result != SQLITE_ROW && result != SQLITE_DONE)
+                        return statementFailure(statement, "inspect", fray::errors::FAILED_LOAD_STATE);
+                    exists = result == SQLITE_ROW;
+                    return fray::errors::NONE;
+                }
+
                 F_err get(const std::string& key, float& value)
                 {
                     double stored;
@@ -648,6 +663,8 @@ namespace fray
                         fray::log::engineError("Cannot remove state: store is not open.");
                         return fray::errors::FAILED_REMOVE_STATE;
                     }
+                    if (!projectAvailable())
+                        return fray::errors::FAILED_REMOVE_STATE;
                     if (!validKey(key))
                         return fray::errors::INVALID_STATE_KEY;
                     sqlite3_stmt* raw = nullptr;
@@ -673,8 +690,6 @@ namespace fray
                         return fray::errors::STATE_NOT_FOUND;
                     }
                     statement.reset();
-                    if (!saveProject())
-                        return fray::errors::FAILED_REMOVE_STATE;
                     return fray::errors::NONE;
                 }
 
@@ -685,6 +700,8 @@ namespace fray
                         fray::log::engineError("Cannot remove state table: store is not open.");
                         return fray::errors::FAILED_REMOVE_STATE;
                     }
+                    if (!projectAvailable())
+                        return fray::errors::FAILED_REMOVE_STATE;
                     F_bool exists;
                     if (!tableExists(_table.c_str(), exists))
                         return fray::errors::FAILED_REMOVE_STATE;
@@ -699,8 +716,6 @@ namespace fray
                         fray::log::engineError("Failed to remove state table: %s", sqlite3_errmsg(_db));
                         return fray::errors::FAILED_REMOVE_STATE;
                     }
-                    if (!saveProject())
-                        return fray::errors::FAILED_REMOVE_STATE;
                     return fray::errors::NONE;
                 }
 
@@ -711,6 +726,8 @@ namespace fray
                         fray::log::engineError("Cannot rename state table: store is not open or name is invalid.");
                         return fray::errors::FAILED_RENAME_STATE_TABLE;
                     }
+                    if (!projectAvailable())
+                        return fray::errors::FAILED_RENAME_STATE_TABLE;
                     F_bool exists;
                     if (!tableExists(_table.c_str(), exists))
                         return fray::errors::FAILED_RENAME_STATE_TABLE;
@@ -736,8 +753,6 @@ namespace fray
                         return fray::errors::FAILED_RENAME_STATE_TABLE;
                     }
                     _table = renamed;
-                    if (!saveProject())
-                        return fray::errors::FAILED_RENAME_STATE_TABLE;
                     return fray::errors::NONE;
                 }
         };

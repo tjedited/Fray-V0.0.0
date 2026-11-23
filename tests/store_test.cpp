@@ -5,6 +5,8 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 
@@ -34,6 +36,18 @@ static void execute(const char* path, const char* sql)
     assert(sqlite3_close(db) == SQLITE_OK);
 }
 
+static std::string databasePath(const char* path)
+{
+    const std::filesystem::path archive(path);
+    const auto name = archive.stem();
+    return (archive.parent_path() / name / (name.string() + ".sqlite")).string();
+}
+
+static void mutateProject(const char* path, const char* sql)
+{
+    execute(databasePath(path).c_str(), sql);
+}
+
 static std::int64_t readInteger(StateManager& manager, const char* key)
 {
     std::int64_t value = -1;
@@ -43,6 +57,14 @@ static std::int64_t readInteger(StateManager& manager, const char* key)
 
 static void testSetLogging(const char* path)
 {
+    {
+        fray::files::FileManager project;
+        assert(project.open(path) == fray::errors::NONE);
+        StateManager manager;
+        assert(manager.open(project, "logging") == fray::errors::NONE);
+    }
+    mutateProject(path, "CREATE TRIGGER reject_logging_update BEFORE UPDATE ON fray_state_6c6f6767696e67 "
+                        "WHEN OLD.key = 'blocked' BEGIN SELECT RAISE(ABORT, 'blocked'); END");
     FILE* capture = std::tmpfile();
     assert(capture != nullptr);
     std::fflush(stdout);
@@ -50,10 +72,12 @@ static void testSetLogging(const char* path)
     assert(saved >= 0);
     assert(test_dup2(test_fileno(capture), test_fileno(stdout)) >= 0);
     {
+        fray::files::FileManager project;
+        assert(project.open(path) == fray::errors::NONE);
         StateManager manager;
         StateManager mirror;
-        assert(manager.open(path, "logging") == fray::errors::NONE);
-        assert(mirror.open(path, "logging") == fray::errors::NONE);
+        assert(manager.open(project, "logging") == fray::errors::NONE);
+        assert(mirror.open(project, "logging") == fray::errors::NONE);
         assert(manager.set("text\nkey", std::string("a\0\"\\b", 5)) == fray::errors::NONE);
         assert(manager.set("integer", std::numeric_limits<std::int64_t>::min()) == fray::errors::NONE);
         assert(manager.set("real", 1.2345678901234567) == fray::errors::NONE);
@@ -62,8 +86,6 @@ static void testSetLogging(const char* path)
         assert(manager.set("long", std::string(2000, 'x')) == fray::errors::NONE);
         assert(manager.set("long-binary", StateManager::Binary(1200, 0xab)) == fray::errors::NONE);
         assert(manager.set("blocked", 1) == fray::errors::NONE);
-        execute(path, "CREATE TRIGGER reject_logging_update BEFORE UPDATE ON fray_state_6c6f6767696e67 "
-                      "WHEN OLD.key = 'blocked' BEGIN SELECT RAISE(ABORT, 'blocked'); END");
         assert(manager.set("blocked", 2) == fray::errors::FAILED_SAVE_STATE);
         assert(manager.set("failed", std::numeric_limits<double>::infinity()) == fray::errors::FAILED_SAVE_STATE);
         assert(manager.removeTable() == fray::errors::NONE);
@@ -103,15 +125,21 @@ int main(int argc, char** argv)
 {
     assert(argc == 3);
     testSetLogging(argv[1]);
+    fray::files::FileManager project;
+    assert(project.open(argv[1]) == fray::errors::NONE);
     {
         StateManager manager;
+        fray::files::FileManager unopened;
+        assert(manager.open(unopened) == fray::errors::FAILED_OPEN_STORE);
+        assert(manager.open(project, "") == fray::errors::FAILED_OPEN_STORE);
+        assert(manager.open(project, std::string("a\0b", 3)) == fray::errors::FAILED_OPEN_STORE);
         int shared = 0;
         assert(verifyStateManagerSeparateTranslationUnit(manager, shared) == fray::errors::FAILED_LOAD_STATE);
         std::string text;
         assert(manager.get("key", text) == fray::errors::FAILED_LOAD_STATE);
         assert(manager.set("key", "value") == fray::errors::FAILED_SAVE_STATE);
-        assert(manager.open(argv[1]) == fray::errors::NONE);
-        assert(manager.open(argv[1]) == fray::errors::FAILED_OPEN_STORE);
+        assert(manager.open(project) == fray::errors::NONE);
+        assert(manager.open(project) == fray::errors::FAILED_OPEN_STORE);
         text = "unchanged";
         assert(manager.get("missing", text) == fray::errors::STATE_NOT_FOUND);
         assert(text == "unchanged");
@@ -141,7 +169,7 @@ int main(int argc, char** argv)
 
     {
         StateManager manager;
-        assert(manager.open(argv[1]) == fray::errors::NONE);
+        assert(manager.open(project) == fray::errors::NONE);
         std::string text;
         assert(manager.get("text", text) == fray::errors::NONE);
         assert(text == std::string("hello\0world", 11));
@@ -163,7 +191,7 @@ int main(int argc, char** argv)
 
     {
         StateManager state;
-        assert(state.open(argv[1]) == fray::errors::NONE);
+        assert(state.open(project) == fray::errors::NONE);
         assert(state.set("shared", 123) == fray::errors::NONE);
         int shared = 0;
         assert(verifyStateManagerSeparateTranslationUnit(state, shared) == fray::errors::NONE && shared == 123);
@@ -181,7 +209,7 @@ int main(int argc, char** argv)
         assert(state.remove("shared") == fray::errors::STATE_NOT_FOUND);
 
         StateManager plugin;
-        assert(plugin.open(argv[1], "examplePlugin") == fray::errors::NONE);
+        assert(plugin.open(project, "examplePlugin") == fray::errors::NONE);
         assert(plugin.set("examplePlugin.field", "example value") == fray::errors::NONE);
         assert(plugin.set("application.engine.versionMajor", 9) == fray::errors::NONE);
         assert(plugin.set("boolean", true) == fray::errors::NONE);
@@ -203,17 +231,17 @@ int main(int argc, char** argv)
         assert(plugin.get("application.engine.versionMajor", version) == fray::errors::NONE && version == 9);
         assert(state.get("application.engine.versionMajor", version) == fray::errors::NONE && version == 1);
         StateManager otherCase;
-        assert(otherCase.open(argv[1], "ExamplePlugin") == fray::errors::NONE);
+        assert(otherCase.open(project, "ExamplePlugin") == fray::errors::NONE);
         assert(otherCase.set("examplePlugin.field", "other") == fray::errors::NONE);
         assert(plugin.get("examplePlugin.field", text) == fray::errors::NONE && text == "example value");
         assert(plugin.renameTable("renamed plugin") == fray::errors::NONE);
         assert(plugin.get("examplePlugin.field", text) == fray::errors::NONE && text == "example value");
         assert(plugin.renameTable("Fray") == fray::errors::FAILED_RENAME_STATE_TABLE);
         assert(plugin.close() == fray::errors::NONE);
-        assert(plugin.open(argv[1], "renamed plugin") == fray::errors::NONE);
+        assert(plugin.open(project, "renamed plugin") == fray::errors::NONE);
         assert(plugin.get("examplePlugin.field", text) == fray::errors::NONE && text == "example value");
         StateManager mirror;
-        assert(mirror.open(argv[1], "renamed plugin") == fray::errors::NONE);
+        assert(mirror.open(project, "renamed plugin") == fray::errors::NONE);
         assert(plugin.removeTable() == fray::errors::NONE);
         assert(plugin.get("examplePlugin.field", text) == fray::errors::STATE_NOT_FOUND);
         assert(mirror.get("examplePlugin.field", text) == fray::errors::STATE_NOT_FOUND);
@@ -225,14 +253,14 @@ int main(int argc, char** argv)
         assert(state.get("application.engine.versionMajor", version) == fray::errors::NONE && version == 1);
 
         StateManager unusual;
-        assert(unusual.open(argv[1], "x'); DROP TABLE application_state;--") == fray::errors::NONE);
+        assert(unusual.open(project, "x'); DROP TABLE application_state;--") == fray::errors::NONE);
         assert(unusual.set("key", "safe") == fray::errors::NONE);
         assert(unusual.get("key", text) == fray::errors::NONE && text == "safe");
         assert(state.close() == fray::errors::NONE);
     }
     {
         StateManager state;
-        assert(state.open(":memory:") == fray::errors::NONE);
+        assert(state.open(project, "scratch") == fray::errors::NONE);
         assert(state.set("null", nullptr) == fray::errors::FAILED_SAVE_STATE);
         assert(state.set("key", 1) == fray::errors::NONE);
         assert(state.removeTable() == fray::errors::NONE);
@@ -243,55 +271,74 @@ int main(int argc, char** argv)
         assert(state.close() == fray::errors::NONE);
     }
 
-    execute(argv[1], "CREATE TRIGGER reject_write BEFORE UPDATE ON fray_state_46726179 "
-                     "WHEN OLD.key = 'empty-text' BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    assert(project.close() == fray::errors::NONE);
+    mutateProject(argv[1], "CREATE TRIGGER reject_write BEFORE UPDATE ON fray_state_46726179 "
+                           "WHEN OLD.key = 'empty-text' BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    assert(project.open(argv[1]) == fray::errors::NONE);
     {
         StateManager manager;
-        assert(manager.open(argv[1]) == fray::errors::NONE);
+        assert(manager.open(project) == fray::errors::NONE);
         assert(manager.set("empty-text", "changed") == fray::errors::FAILED_SAVE_STATE);
         std::string value = "unchanged";
         assert(manager.get("empty-text", value) == fray::errors::NONE && value.empty());
     }
 
-    execute(argv[1], "PRAGMA ignore_check_constraints = ON; "
-                     "UPDATE fray_state_46726179 SET value = 2 WHERE key = 'bool'");
+    assert(project.close() == fray::errors::NONE);
+    mutateProject(argv[1], "PRAGMA ignore_check_constraints = ON; "
+                           "UPDATE fray_state_46726179 SET value = 2 WHERE key = 'bool'");
+    assert(project.open(argv[1]) == fray::errors::NONE);
     {
         StateManager manager;
-        assert(manager.open(argv[1]) == fray::errors::NONE);
+        assert(manager.open(project) == fray::errors::NONE);
         bool value = true;
         assert(manager.get("bool", value) == fray::errors::FAILED_LOAD_STATE);
         assert(value);
     }
 
-    execute(argv[1], "CREATE TRIGGER reject_delete BEFORE DELETE ON fray_state_46726179 "
-                     "WHEN OLD.key = 'text' BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    assert(project.close() == fray::errors::NONE);
+    mutateProject(argv[1], "CREATE TRIGGER reject_delete BEFORE DELETE ON fray_state_46726179 "
+                           "WHEN OLD.key = 'text' BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    assert(project.open(argv[1]) == fray::errors::NONE);
     {
         StateManager manager;
-        assert(manager.open(argv[1]) == fray::errors::NONE);
+        assert(manager.open(project) == fray::errors::NONE);
         assert(manager.remove("text") == fray::errors::FAILED_REMOVE_STATE);
         std::string text;
         assert(manager.get("text", text) == fray::errors::NONE && text == std::string("hello\0world", 11));
     }
 
-    execute(argv[2], "CREATE TABLE fray_state_46726179 (key TEXT, value TEXT)");
+    assert(project.close() == fray::errors::NONE);
     {
-        StateManager manager;
-        assert(manager.open(argv[2]) == fray::errors::FAILED_OPEN_STORE);
+        fray::files::FileManager fixture;
+        assert(fixture.open(argv[2]) == fray::errors::NONE);
     }
-    execute(argv[2], "DROP TABLE fray_state_46726179");
+    mutateProject(argv[2], "CREATE TABLE fray_state_46726179 (key TEXT, value TEXT)");
+    {
+        fray::files::FileManager fixture;
+        assert(fixture.open(argv[2]) == fray::errors::NONE);
+        StateManager manager;
+        assert(manager.open(fixture) == fray::errors::FAILED_OPEN_STORE);
+    }
+    mutateProject(argv[2], "DROP TABLE fray_state_46726179");
 
     for (const char* legacy : {"fray_state", "application_state", "engine_state", "ui_state", "state_values"})
     {
         const std::string table(legacy);
-        execute(argv[2], ("CREATE TABLE " + table + " (value TEXT); "
-                          "INSERT INTO " + table + " VALUES ('keep')").c_str());
+        mutateProject(argv[2], ("CREATE TABLE " + table + " (key TEXT, value TEXT); "
+                                "INSERT INTO " + table + " VALUES ('legacy.key', 'keep')").c_str());
         {
+            fray::files::FileManager fixture;
+            assert(fixture.open(argv[2]) == fray::errors::NONE);
             StateManager manager;
-            assert(manager.open(argv[2]) == fray::errors::FAILED_OPEN_STORE);
+            assert(manager.open(fixture) == fray::errors::NONE);
+            std::string value = "unchanged";
+            assert(manager.get("legacy.key", value) == fray::errors::STATE_NOT_FOUND && value == "unchanged");
+            assert(manager.set("current", "new") == fray::errors::NONE);
         }
+        const std::string database = databasePath(argv[2]);
         sqlite3* db = nullptr;
         sqlite3_stmt* statement = nullptr;
-        assert(sqlite3_open(argv[2], &db) == SQLITE_OK);
+        assert(sqlite3_open(database.c_str(), &db) == SQLITE_OK);
         const std::string query = "SELECT value FROM " + table;
         assert(sqlite3_prepare_v2(db, query.c_str(), -1, &statement, nullptr) == SQLITE_OK);
         assert(sqlite3_step(statement) == SQLITE_ROW);
@@ -299,18 +346,18 @@ int main(int argc, char** argv)
         assert(sqlite3_finalize(statement) == SQLITE_OK);
         assert(sqlite3_prepare_v2(db, "SELECT count(*) FROM sqlite_master WHERE name = 'fray_state_46726179'",
                                   -1, &statement, nullptr) == SQLITE_OK);
-        assert(sqlite3_step(statement) == SQLITE_ROW && sqlite3_column_int(statement, 0) == 0);
+        assert(sqlite3_step(statement) == SQLITE_ROW && sqlite3_column_int(statement, 0) == 1);
         assert(sqlite3_finalize(statement) == SQLITE_OK);
         assert(sqlite3_close(db) == SQLITE_OK);
-        execute(argv[2], ("DROP TABLE " + table).c_str());
+        mutateProject(argv[2], ("DROP TABLE " + table).c_str());
     }
+    mutateProject(argv[2], "CREATE VIEW application_state AS SELECT 'keep' AS value");
     {
+        fray::files::FileManager fixture;
+        assert(fixture.open(argv[2]) == fray::errors::NONE);
         StateManager manager;
-        assert(manager.open(argv[2]) == fray::errors::NONE);
-        assert(manager.set("key", "value") == fray::errors::NONE);
-        execute(argv[2], "ALTER TABLE fray_state_46726179 RENAME COLUMN key TO wrong_key");
-        std::string value = "unchanged";
-        assert(manager.get("key", value) == fray::errors::FAILED_LOAD_STATE && value == "unchanged");
-        assert(manager.remove("key") == fray::errors::FAILED_REMOVE_STATE);
+        assert(manager.open(fixture) == fray::errors::NONE);
+        std::string value;
+        assert(manager.get("current", value) == fray::errors::NONE && value == "new");
     }
 }

@@ -1,83 +1,111 @@
 # Fray V0.0.0
 A New Platform for Creatives & Developers
 
-## Application state storage
+## Project and state management
 
-Create a file manager for a `.fry` project, then open a state manager using
-it. `get` returns an error code and writes the value to an output parameter:
+Each engine process has one `fray::FrayManager`, which can own multiple
+projects. Open a `.fry` archive or a working folder:
 
 ```cpp
-fray::files::FileManager project;
-ERR(project.open("project.fry"));
-fray::state::StateManager state;
-ERR(state.open(project));
-ERR(state.set("application.engine.versionMajor", 1));
-int version;
-ERR(state.get("application.engine.versionMajor", version));
+fray::FrayManager app("Fray");
+ERR(app.openProject("TestProject.fry"));
+
+fray::ProjectManager& project = app.project("TestProject");
+ERR(project.set("project.version.major", 0));
+ERR(project.set("project.version.minor", 0));
+ERR(project.set("project.version.bug", 0));
+
+std::string name;
+F_long major;
+ERR(project.get("project.name", name));
+ERR(project.get("project.version.major", major));
+ERR(project.close());
 ```
 
-The file manager must outlive the state managers using it. Pass managers by
-reference to functions that need them. A state manager closes its database
-when destroyed; call `close()` to close it earlier.
-
-Each plug-in can use its own table in the same database:
+`project.name` is initialized from the archive or folder name when absent.
+Each project owns a file manager and one or more state managers. The default
+state manager backs `project.set` and `project.get`; other tables can be
+opened independently:
 
 ```cpp
-fray::state::StateManager plugin;
-ERR(plugin.open(project, "examplePlugin"));
+ERR(project.openState("examplePlugin"));
+fray::state::StateManager& plugin = project.state("examplePlugin");
 ERR(plugin.set("examplePlugin.field", "example value"));
 std::string value;
 ERR(plugin.get("examplePlugin.field", value));
 ```
 
-Opening creates the named table if needed; setting a key creates or replaces
+State managers share the project's file manager and database. Opening a
+state manager creates its table if needed; setting a key creates or replaces
 that entry. Dots are part of the key, not separate tables. `remove(key)` deletes
 an entry, `renameTable(name)` renames the current table, and `removeTable()`
 **deletes the current table and all its entries**. A later `set` recreates a
 removed table. Reopen a renamed table using its new name.
 
-`.fry` files are ZIP archives containing `state.sqlite`; other archive entries
-are preserved when saving. The file manager keeps a temporary working database
-and saves a consistent SQLite snapshot after every state change, including
-table creation, removal, and rename. Rewriting the archive synchronously on
-every change may be expensive for large projects. The file manager does not yet
-provide an API for adding or reading other project files.
-
-If saving fails, the operation returns an error but its change may already be
-present in the working database. Restore access to the project and call
-`project.save()` to retry. Closing a project with unsaved changes fails; if
-the file manager is destroyed, it logs the retained workspace path for
-recovery. A `.fry.lock` sidecar prevents simultaneous opens by cooperating
-Fray processes; do not delete it while a project is open. Calls are not safe
-for concurrent use without external synchronization.
-
+Supported values are strings, signed 64-bit integers, finite doubles, booleans,
+and `StateManager::Binary`. Getters return `STATE_NOT_FOUND` for missing entries,
+`STATE_TYPE_MISMATCH` for the wrong type, and `STATE_VALUE_OUT_OF_RANGE` when a
+numeric value cannot fit the requested type; their output remains unchanged on
+error. Keys and table names must be nonempty and contain no null characters.
 Every successful `set` logs the key and complete value at info level, including
 binary values as hexadecimal. Text and keys use byte escapes for control and
 non-ASCII bytes. Avoid storing secrets in state if logs may be accessible.
 
-Supported values are strings, signed 64-bit integers, finite doubles, booleans,
-and `StateManager::Binary`. Getters return `STATE_NOT_FOUND` for missing entries,
-`STATE_TYPE_MISMATCH` for the wrong type, and `STATE_VALUE_OUT_OF_RANGE` when a
-numeric value cannot fit the requested type; their output remains unchanged on error. Keys and
-table names must be nonempty and contain no null characters.
+## Project files and recovery
 
-Databases from previous state-storage iterations are not migrated. Databases
-containing the old state tables are rejected without modification; use a new
-database instead.
+`TestProject.fry` is a ZIP archive. Its working folder is `TestProject/`, and
+its database is `TestProject/TestProject.sqlite`. If the archive exists and
+the folder does not, opening extracts the archive. If neither exists, opening
+creates the folder and database. Opening an existing folder uses its name for
+the project and creates the database if it is missing. Other project files can
+be accessed under the working folder through `project.fileManager().filePath`.
 
-The current engine startup still uses an in-memory database as a demonstration;
-it does not yet open a project. Plug-in loading does not yet automatically
-create state objects. Background saving, undo/redo, and grouped transactions
-are not implemented.
+State changes are written to the working SQLite database immediately; the ZIP
+archive is created or updated when the project closes. After the archive is
+written successfully, the working folder is removed. Call `close()` explicitly
+and check its result: if archiving fails, the working folder is retained and
+closing can be retried. If cleanup fails, the archive is preserved and closing
+can be retried to remove the remaining folder without rewriting the archive.
+For safety, cleanup refuses filesystem roots, home directories, the current
+working directory or its ancestors, and folders containing a `.git` entry.
+`app.closeProject(name)` closes and removes a project from the manager;
+`app.close()` closes all projects. Destructors attempt to close remaining
+projects, but cannot report errors to the caller. References to a project or
+state manager must not be used after its owner is closed or removed.
+
+If both the archive and matching folder exist, `openProject` returns
+`PROJECT_CONFLICT` by default. Ask the user which copy to open, then retry with
+`fray::files::ConflictChoice::Archive` or `ConflictChoice::Folder`. The archive
+choice extracts into a separate directory such as
+`TestProject.archive-1/TestProject/`. The folder choice keeps the original
+archive untouched and writes a separate archive such as
+`TestProject.recovered-1/TestProject.fry` on close. Both paths retain the
+project name and can be reopened. Only the working folder selected for the
+project is removed after its archive is saved; an unselected folder is left
+untouched. The engine's current startup prompts for
+this choice when opening `TestProject.fry` in its working directory.
+
+A `.fry.lock` sidecar prevents simultaneous opens by cooperating Fray
+processes; do not delete it while a project is open. Do not modify a project's
+files externally while it is open. Calls are not safe for concurrent use
+without external synchronization. ZIP extraction rejects unsafe paths and
+symbolic links, and archiving refuses symbolic links.
+
+Databases from previous state-storage iterations are not migrated. Old tables
+are left untouched, but their values are not available through the current
+state manager. Plug-in loading does not yet automatically create state objects.
+Undo/redo and grouped transactions are not implemented.
+
+## Tests
 
 The engine requires SQLite and libzip (for example, Homebrew `sqlite` and
 `libzip` on macOS, or the corresponding vcpkg packages on Windows). On macOS,
-run the storage tests with paths to new, nonexistent files:
+run the storage tests in a new temporary directory:
 
 ```sh
 test_dir="$(mktemp -d)"
 g++ -std=c++17 -IEngine -I/opt/homebrew/include tests/store_test.cpp tests/state_manager_link_test.cpp -L/opt/homebrew/lib -lsqlite3 -lzip -o "$test_dir/store-test"
-"$test_dir/store-test" "$test_dir/state.sqlite" "$test_dir/legacy.sqlite"
+"$test_dir/store-test" "$test_dir/state.fry" "$test_dir/legacy.fry"
 g++ -std=c++17 -IEngine -I/opt/homebrew/include tests/file_manager_test.cpp -L/opt/homebrew/lib -lsqlite3 -lzip -o "$test_dir/file-manager-test"
-"$test_dir/file-manager-test" "$test_dir/project.fry" "$test_dir/invalid.fry"
+"$test_dir/file-manager-test" "$test_dir"
 ```

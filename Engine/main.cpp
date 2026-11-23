@@ -1,6 +1,8 @@
 /* main.cpp */
 #include "main.hpp"
 
+#include <iostream>
+
 F_err TCPMessageHandler(
     std::string incomingMessage)
 {
@@ -17,33 +19,58 @@ F_err main(
 {
     F_err err = fray::errors::NONE;
 
-    fray::files::FileManager project;
-    ERR(project.open("project.fry"));
-
-    fray::state::StateManager state;
-    fray::state::StateManager test;
-    ERR(state.open(project));
-
-    ERR(state.set("application.id", "Fray Test Build 1"));
-    ERR(state.set("engine.version.major", 1));
-    ERR(state.set("engine.version.minor", 2));
-    ERR(state.set("engine.version.bug", 3));
-
-    ERR(test.open(project, "test"));
-    if (test.remove("app.yoyo") != fray::errors::NONE) {
-        ERR(test.set("app.yoyo", "ma"));
+    fray::FrayManager app;
+    F_err opened = app.openProject("TestProject.fry");
+    if (opened == fray::errors::PROJECT_CONFLICT)
+    {
+        std::cout << "Both TestProject.fry and its working folder exist.\n"
+                     "1: Open the archive in a separate folder\n"
+                     "2: Open the working folder and save to a separate archive\n"
+                     "0: Cancel\n> ";
+        int choice = 0;
+        if (!(std::cin >> choice) || (choice != 1 && choice != 2))
+        {
+            fray::log::engineError("Project opening cancelled.");
+            return fray::errors::FAILED_OPEN_PROJECT;
+        }
+        opened = app.openProject("TestProject.fry", choice == 1
+            ? fray::files::ConflictChoice::Archive : fray::files::ConflictChoice::Folder);
     }
+    ERR(opened);
 
-    ERR(state.set("ui.version.major", 4));
-    ERR(state.set("ui.version.minor", 5));
-    ERR(state.set("ui.version.bug", 6));
+    fray::ProjectManager& project = app.project("TestProject");
+
+    ERR(project.set("project.version.major", 0));
+    ERR(project.set("project.version.minor", 0));
+    ERR(project.set("project.version.bug", 0));
+    std::string projectName;
+    F_long projectMajor;
+    ERR(project.get("project.name", projectName));
+    ERR(project.get("project.version.major", projectMajor));
+    fray::log::engineInfo("Project %s has major version %d", projectName.c_str(), projectMajor);
+
+    ERR(project.set("application.id", "Fray Test Build 1"));
+    ERR(project.set("engine.version.major", 1));
+    ERR(project.set("engine.version.minor", 2));
+    ERR(project.set("engine.version.bug", 3));
+
+    ERR(project.openState("test"));
+    fray::state::StateManager& test = project.state("test");
+    ERR(test.set("app.yoyo", "ma"));
+
+    ERR(project.set("ui.version.major", 4));
+    ERR(project.set("ui.version.minor", 5));
+    ERR(project.set("ui.version.bug", 6));
 
     F_long uiVersionMajor, uiVersionMinor, uiVersionBug;
-    ERR(state.get("ui.version.major", uiVersionMajor));
-    ERR(state.get("ui.version.minor", uiVersionMinor));
-    ERR(state.get("ui.version.bug", uiVersionBug));
+    ERR(project.get("ui.version.major", uiVersionMajor));
+    ERR(project.get("ui.version.minor", uiVersionMinor));
+    ERR(project.get("ui.version.bug", uiVersionBug));
     fray::log::engineInfo("The UI Major version is %d.%d.%d", uiVersionMajor, uiVersionMinor, uiVersionBug);
 
+    const std::string archive = project.fileManager().archivePath().string();
+    ERR(project.close());
+    fray::log::engineInfo("Saved project to %s", archive.c_str());
     return err;
 
     /*
