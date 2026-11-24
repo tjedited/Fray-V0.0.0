@@ -7,6 +7,8 @@
 #include "errors.hpp"
 #include "log.hpp"
 #include "file_manager.hpp"
+#include "thread_manager.hpp"
+#include "file_watcher.hpp"
 #include "state_manager.hpp"
 #include "project_manager.hpp"
 #include "fray_manager.hpp"

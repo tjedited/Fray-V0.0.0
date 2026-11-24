@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <type_traits>
 #include <variant>
@@ -33,6 +34,7 @@ namespace fray
                 // Variant order defines the persisted type tags and must remain stable.
                 using Value = std::variant<std::string, std::int64_t, double, bool, Binary>;
                 using Statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
+                mutable std::recursive_mutex _mutex;
                 sqlite3* _db = nullptr;
                 std::string _table;
                 fray::files::FileManager* _files = nullptr;
@@ -260,6 +262,7 @@ namespace fray
 
                 F_err write(const std::string& key, const Value& value, F_bool retry = true)
                 {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
                     {
                         fray::log::engineError("Cannot save state: store is not open.");
@@ -352,6 +355,7 @@ namespace fray
                 template<typename T>
                 F_err read(const std::string& key, T& output, int expectedType)
                 {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
                     {
                         fray::log::engineError("Cannot load state: store is not open.");
@@ -469,6 +473,7 @@ namespace fray
                 F_err open(fray::files::FileManager& files, const std::string& table = "Fray",
                            const std::string& applicationId = "")
                 {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (!files.isOpen())
                     {
                         fray::log::engineError("Cannot open state: project is not open.");
@@ -530,10 +535,18 @@ namespace fray
 
                 const std::string& projectName() const { return _projectName; }
                 const std::string& applicationId() const { return _applicationId; }
-                bool isOpen() const { return _db != nullptr; }
+                bool isOpen() const
+                {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
+                    return _db != nullptr;
+                }
+
+                // Held by the owner while it closes and reopens the database around a file rename.
+                std::recursive_mutex& mutex() { return _mutex; }
 
                 F_err close()
                 {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
                     {
                         fray::log::engineError("Cannot close store: no database is open.");
@@ -587,6 +600,7 @@ namespace fray
 
                 F_err contains(const std::string& key, F_bool& exists)
                 {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
                     {
                         fray::log::engineError("Cannot inspect state: store is not open.");
@@ -658,6 +672,7 @@ namespace fray
 
                 F_err remove(const std::string& key)
                 {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
                     {
                         fray::log::engineError("Cannot remove state: store is not open.");
@@ -695,6 +710,7 @@ namespace fray
 
                 F_err removeTable()
                 {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
                     {
                         fray::log::engineError("Cannot remove state table: store is not open.");
@@ -721,6 +737,7 @@ namespace fray
 
                 F_err renameTable(const std::string& name)
                 {
+                    std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr || name.empty() || name.find('\0') != std::string::npos)
                     {
                         fray::log::engineError("Cannot rename state table: store is not open or name is invalid.");

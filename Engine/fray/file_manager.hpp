@@ -2,12 +2,16 @@
 #define FRAY_FILE_MANAGER_HPP
 
 #include <cstdlib>
+#include <cerrno>
+#include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <set>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include <zip.h>
 
@@ -19,10 +23,22 @@
 #include <io.h>
 #include <share.h>
 #include <sys/stat.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #else
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <linux/fs.h>
+#endif
 #endif
 
 namespace fray { namespace state { class StateManager; } }
@@ -41,11 +57,20 @@ namespace fray
                 friend class fray::ProjectManager;
                 std::filesystem::path _archive;
                 std::filesystem::path _workspace;
-                std::filesystem::path _extraDirectory;
                 std::string _name;
                 bool _archiveExists = false;
-                int _lock = -1;
-                int _extraLock = -1;
+                bool _extracted = false;
+                struct ProjectLock
+                {
+#ifdef _WIN32
+                    HANDLE handle = INVALID_HANDLE_VALUE;
+#else
+                    int handle = -1;
+#endif
+                    std::filesystem::path path;
+                };
+                ProjectLock _lock;
+                ProjectLock _extraLock;
                 unsigned _users = 0;
                 std::shared_ptr<int> _lifetime = std::make_shared<int>(0);
 
@@ -63,71 +88,235 @@ namespace fray
                     return true;
                 }
 
-                bool lockProject(const std::filesystem::path& archive, int& lock)
+                bool lockProject(const std::filesystem::path& archive, ProjectLock& lock)
                 {
-                    const std::string path = archive.string() + ".lock";
+                    auto lockPath = archive;
+                    lockPath.replace_extension(".lock");
 #ifdef _WIN32
-                    if (_sopen_s(&lock, path.c_str(), _O_CREAT | _O_RDWR | _O_BINARY,
-                                 _SH_DENYRW, _S_IREAD | _S_IWRITE) != 0)
-                        lock = -1;
-#else
-                    lock = ::open(path.c_str(), O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
-                    if (lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) != 0)
+                    lock.handle = CreateFileW(lockPath.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0,
+                                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                                              nullptr);
+                    if (lock.handle != INVALID_HANDLE_VALUE)
                     {
-                        ::close(lock);
-                        lock = -1;
+                        BY_HANDLE_FILE_INFORMATION info;
+                        if (!GetFileInformationByHandle(lock.handle, &info) ||
+                            (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+                            info.nFileSizeHigh != 0 || info.nFileSizeLow != 0)
+                        {
+                            CloseHandle(lock.handle);
+                            lock.handle = INVALID_HANDLE_VALUE;
+                        }
                     }
+                    if (lock.handle == INVALID_HANDLE_VALUE)
+#else
+                    lock.handle = ::open(lockPath.c_str(), O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
+                    if (lock.handle >= 0 && flock(lock.handle, LOCK_EX | LOCK_NB) != 0)
+                    {
+                        ::close(lock.handle);
+                        lock.handle = -1;
+                    }
+                    if (lock.handle >= 0)
+                    {
+                        // A previous owner may have unlinked this inode before we acquired it.
+                        struct stat descriptor, pathStatus;
+                        if (fstat(lock.handle, &descriptor) != 0 || lstat(lockPath.c_str(), &pathStatus) != 0 ||
+                            descriptor.st_dev != pathStatus.st_dev || descriptor.st_ino != pathStatus.st_ino ||
+                            !S_ISREG(pathStatus.st_mode) || descriptor.st_size != 0)
+                        {
+                            ::close(lock.handle);
+                            lock.handle = -1;
+                        }
+                    }
+                    if (lock.handle < 0)
 #endif
-                    if (lock < 0)
-                        fray::log::engineError("Cannot lock project: %s", path.c_str());
-                    return lock >= 0;
+                    {
+                        fray::log::engineError("Cannot lock project: %s", lockPath.string().c_str());
+                        return false;
+                    }
+                    lock.path = lockPath;
+                    return true;
                 }
 
-                static void unlockProject(int& lock)
+#ifndef _WIN32
+                static bool lockIntact(const ProjectLock& lock)
                 {
-                    if (lock < 0)
+                    struct stat descriptor, pathStatus;
+                    return lock.handle >= 0 && fstat(lock.handle, &descriptor) == 0 &&
+                           lstat(lock.path.c_str(), &pathStatus) == 0 && descriptor.st_dev == pathStatus.st_dev &&
+                           descriptor.st_ino == pathStatus.st_ino && S_ISREG(pathStatus.st_mode) &&
+                           descriptor.st_size == 0;
+                }
+#endif
+
+                // Recreates the lock file if the user renamed or deleted it while the project is open.
+                void restoreLock()
+                {
+#ifndef _WIN32
+                    if (_lock.handle < 0 || _archive.empty() || lockIntact(_lock))
                         return;
-#ifdef _WIN32
-                    _close(lock);
-#else
-                    ::close(lock);
+                    ::close(_lock.handle);
+                    _lock = ProjectLock();
+                    if (lockProject(_archive, _lock))
+                        fray::log::engineInfo("Project lock was missing and has been recreated.");
 #endif
-                    lock = -1;
                 }
 
-                void reset()
+                static bool unlockProject(ProjectLock& lock)
                 {
-                    unlockProject(_extraLock);
-                    unlockProject(_lock);
-                    if (!_extraDirectory.empty())
+#ifdef _WIN32
+                    if (lock.handle == INVALID_HANDLE_VALUE)
+                        return true;
+                    FILE_DISPOSITION_INFO disposition = {TRUE};
+                    if (!SetFileInformationByHandle(lock.handle, FileDispositionInfo, &disposition, sizeof(disposition)))
                     {
-                        std::error_code error;
-                        if (std::filesystem::is_empty(_extraDirectory, error))
-                            std::filesystem::remove(_extraDirectory, error);
-                        if (error)
-                            fray::log::engineError("Cannot clean up project directory: %s", error.message().c_str());
-                        _extraDirectory.clear();
+                        fray::log::engineError("Cannot remove project lock: %s", lock.path.string().c_str());
+                        return false;
                     }
+                    if (!CloseHandle(lock.handle))
+                    {
+                        fray::log::engineError("Cannot release project lock: %s", lock.path.string().c_str());
+                        return false;
+                    }
+                    lock.handle = INVALID_HANDLE_VALUE;
+#else
+                    if (lock.handle < 0)
+                        return true;
+                    // A lock that was renamed or deleted by the user is no longer ours to remove.
+                    if (lockIntact(lock) && ::unlink(lock.path.c_str()) != 0)
+                    {
+                        fray::log::engineError("Cannot remove project lock: %s", lock.path.string().c_str());
+                        return false;
+                    }
+                    ::close(lock.handle);
+                    lock.handle = -1;
+#endif
+                    lock.path.clear();
+                    return true;
+                }
+
+                bool reset()
+                {
+                    if (!unlockProject(_extraLock) || !unlockProject(_lock))
+                        return false;
                     _archive.clear();
                     _workspace.clear();
                     _name.clear();
                     _archiveExists = false;
+                    _extracted = false;
+                    return true;
+                }
+
+                // Copies <workspace>/<stem>.sqlite into <workspace>/snapshots as <stem>-<yyyymmddhhmmss>[-#].sqlite.
+                // Call while the database is closed. A missing database is not an error.
+                bool snapshotDatabase(const std::string& stem)
+                {
+                    const auto database = _workspace / (stem + ".sqlite");
+                    bool exists;
+                    if (!pathExists(database, exists))
+                        return false;
+                    if (!exists)
+                        return true;
+                    const std::time_t now = std::time(nullptr);
+                    std::tm local{};
+#ifdef _WIN32
+                    localtime_s(&local, &now);
+#else
+                    localtime_r(&now, &local);
+#endif
+                    char stamp[16];
+                    std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &local);
+                    const auto folder = _workspace / "snapshots";
+                    std::error_code error;
+                    std::filesystem::create_directory(folder, error);
+                    if (error)
+                    {
+                        fray::log::engineError("Cannot create snapshots folder: %s", error.message().c_str());
+                        return false;
+                    }
+                    auto target = folder / (stem + "-" + stamp + ".sqlite");
+                    for (unsigned number = 1; ; ++number)
+                    {
+                        if (!pathExists(target, exists))
+                            return false;
+                        if (!exists)
+                            break;
+                        target = folder / (stem + "-" + stamp + "-" + std::to_string(number) + ".sqlite");
+                    }
+                    std::filesystem::copy_file(database, target, std::filesystem::copy_options::none, error);
+                    if (error)
+                    {
+                        fray::log::engineError("Cannot snapshot project database: %s", error.message().c_str());
+                        return false;
+                    }
+                    return true;
+                }
+
+                // Deletes the .fry the working folder was extracted from; it is recreated when packaging.
+                void removeArchive()
+                {
+                    if (!_archiveExists)
+                        return;
+                    std::error_code error;
+                    std::filesystem::remove(_archive, error);
+                    if (error)
+                        fray::log::engineError("Cannot remove %s while the project is open: %s",
+                                               _archive.string().c_str(), error.message().c_str());
+                    else
+                        _archiveExists = false;
+                }
+
+                // Locks the archive path the project will have under `newName`; fails if it is taken.
+                bool acquireRename(const std::string& newName, ProjectLock& lock)
+                {
+                    restoreLock();
+                    const auto newArchive = _archive.parent_path() / (newName + ".fry");
+                    bool exists;
+                    if (!pathExists(newArchive, exists))
+                        return false;
+                    if (exists)
+                    {
+                        fray::log::engineError("Cannot rename project: %s already exists.", newArchive.string().c_str());
+                        return false;
+                    }
+                    return lockProject(newArchive, lock);
+                }
+
+                void commitRename(const std::string& newName, const std::filesystem::path& workspace, ProjectLock& lock)
+                {
+                    ProjectLock previous = _lock;
+                    _lock = lock;
+                    lock = ProjectLock();
+                    _name = newName;
+                    _workspace = workspace;
+                    _archive = _archive.parent_path() / (newName + ".fry");
+                    if (!unlockProject(previous))
+                        fray::log::engineError("The previous project lock could not be removed.");
+                }
+
+                static bool pathExists(const std::filesystem::path& path, bool& exists)
+                {
+                    std::error_code error;
+                    const auto status = std::filesystem::symlink_status(path, error);
+                    if (error && error != std::errc::no_such_file_or_directory)
+                    {
+                        fray::log::engineError("Cannot inspect project path: %s", error.message().c_str());
+                        return false;
+                    }
+                    exists = status.type() != std::filesystem::file_type::not_found;
+                    return true;
                 }
 
                 static bool unusedPath(const std::filesystem::path& parent, const std::string& stem,
-                                       const std::string& extension, std::filesystem::path& output)
+                                       std::filesystem::path& output)
                 {
-                    std::error_code error;
                     for (unsigned i = 1; i < 100000; ++i)
                     {
-                        const auto candidate = parent / (stem + "-" + std::to_string(i) + extension);
-                        const bool exists = std::filesystem::exists(candidate, error);
-                        if (error)
-                        {
-                            fray::log::engineError("Cannot inspect project path: %s", error.message().c_str());
+                        const auto candidate = parent / (stem + "-" + std::to_string(i));
+                        bool folderExists, archiveExists;
+                        if (!pathExists(candidate, folderExists) ||
+                            !pathExists(candidate.string() + ".fry", archiveExists))
                             return false;
-                        }
-                        if (!exists)
+                        if (!folderExists && !archiveExists)
                         {
                             output = candidate;
                             return true;
@@ -135,6 +324,131 @@ namespace fray
                     }
                     fray::log::engineError("Cannot find an unused project path.");
                     return false;
+                }
+
+                static bool renameExclusive(const std::filesystem::path& from, const std::filesystem::path& to)
+                {
+#ifdef _WIN32
+                    if (MoveFileW(from.c_str(), to.c_str()) != 0)
+                        return true;
+                    const std::error_code error(static_cast<int>(GetLastError()), std::system_category());
+#elif defined(__APPLE__)
+                    if (::renamex_np(from.c_str(), to.c_str(), RENAME_EXCL) == 0)
+                        return true;
+                    const std::error_code error(errno, std::generic_category());
+#elif defined(__linux__)
+                    if (::syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), RENAME_NOREPLACE) == 0)
+                        return true;
+                    const std::error_code error(errno, std::generic_category());
+#else
+                    const std::error_code error = std::make_error_code(std::errc::operation_not_supported);
+#endif
+                    fray::log::engineError("Cannot rename %s to %s: %s",
+                        from.string().c_str(), to.string().c_str(), error.message().c_str());
+                    return false;
+                }
+
+                static bool renameFolderDatabase(const std::filesystem::path& folder,
+                                                 const std::string& oldName, const std::string& newName)
+                {
+                    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> renamed;
+                    for (const char* suffix : {".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal"})
+                    {
+                        const auto from = folder / (oldName + suffix);
+                        const auto to = folder / (newName + suffix);
+                        bool exists, destinationExists;
+                        if (!pathExists(from, exists) || !pathExists(to, destinationExists))
+                            return false;
+                        if (exists && destinationExists)
+                        {
+                            fray::log::engineError("Cannot rename project database: destination already exists: %s",
+                                                   to.string().c_str());
+                            return false;
+                        }
+                        if (exists)
+                            renamed.emplace_back(from, to);
+                    }
+                    std::size_t completed = 0;
+                    for (; completed < renamed.size(); ++completed)
+                    {
+                        if (!renameExclusive(renamed[completed].first, renamed[completed].second))
+                        {
+                            while (completed > 0)
+                            {
+                                --completed;
+                                if (!renameExclusive(renamed[completed].second, renamed[completed].first))
+                                    fray::log::engineError("Could not restore a renamed project database file.");
+                            }
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+
+                static bool renameArchiveDatabase(const std::filesystem::path& path,
+                                                  const std::string& oldName, const std::string& newName)
+                {
+                    int error = 0;
+                    zip_t* archive = zip_open(path.string().c_str(), ZIP_CHECKCONS, &error);
+                    if (!archive)
+                    {
+                        if (error == ZIP_ER_NOZIP || error == ZIP_ER_INCONS || error == ZIP_ER_EOF)
+                        {
+                            fray::log::engineInfo("Unselected file is not a readable ZIP; leaving its contents unchanged: %s",
+                                                  path.string().c_str());
+                            return true;
+                        }
+                        fray::log::engineError("Cannot open renamed project archive (zip error %d).", error);
+                        return false;
+                    }
+                    bool changed = false;
+                    for (const char* suffix : {".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal"})
+                    {
+                        const std::string from = oldName + suffix;
+                        const std::string to = newName + suffix;
+                        const zip_int64_t index = zip_name_locate(archive, from.c_str(), 0);
+                        if (index < 0)
+                        {
+                            if (zip_error_code_zip(zip_get_error(archive)) == ZIP_ER_NOENT)
+                                continue;
+                            fray::log::engineError("Cannot inspect renamed project archive: %s", zip_strerror(archive));
+                            zip_discard(archive);
+                            return false;
+                        }
+                        if (zip_name_locate(archive, to.c_str(), 0) >= 0)
+                        {
+                            fray::log::engineError("Cannot rename archived project database: destination already exists: %s",
+                                                   to.c_str());
+                            zip_discard(archive);
+                            return false;
+                        }
+                        if (zip_error_code_zip(zip_get_error(archive)) != ZIP_ER_NOENT)
+                        {
+                            fray::log::engineError("Cannot inspect renamed project archive: %s", zip_strerror(archive));
+                            zip_discard(archive);
+                            return false;
+                        }
+                        if (zip_file_rename(archive, static_cast<zip_uint64_t>(index),
+                                            to.c_str(), ZIP_FL_ENC_UTF_8) != 0)
+                        {
+                            fray::log::engineError("Cannot rename archived project database: %s", zip_strerror(archive));
+                            zip_discard(archive);
+                            return false;
+                        }
+                        changed = true;
+                    }
+                    if (!changed)
+                    {
+                        zip_discard(archive);
+                        return true;
+                    }
+                    if (zip_close(archive) != 0)
+                    {
+                        fray::log::engineError("Cannot update renamed project archive: %s", zip_strerror(archive));
+                        zip_discard(archive);
+                        return false;
+                    }
+                    return true;
                 }
 
                 bool extract()
@@ -236,7 +550,20 @@ namespace fray
                     if (_users != 0)
                         fray::log::engineError("File manager destroyed while state managers are still using it.");
                     _lifetime.reset();
-                    reset();
+                    if (!reset())
+                    {
+#ifdef _WIN32
+                        if (_extraLock.handle != INVALID_HANDLE_VALUE)
+                            CloseHandle(_extraLock.handle);
+                        if (_lock.handle != INVALID_HANDLE_VALUE)
+                            CloseHandle(_lock.handle);
+#else
+                        if (_extraLock.handle >= 0)
+                            ::close(_extraLock.handle);
+                        if (_lock.handle >= 0)
+                            ::close(_lock.handle);
+#endif
+                    }
                 }
 
                 bool isOpen() const { return !_workspace.empty(); }
@@ -270,7 +597,8 @@ namespace fray
 
                 F_err open(const std::string& path, ConflictChoice choice = ConflictChoice::Ask)
                 {
-                    if (isOpen() || path.empty() || path.find('\0') != std::string::npos)
+                    if (isOpen() || !_lock.path.empty() || !_extraLock.path.empty() ||
+                        path.empty() || path.find('\0') != std::string::npos)
                     {
                         fray::log::engineError("Cannot open project: invalid path or project already open.");
                         return fray::errors::FAILED_OPEN_PROJECT;
@@ -295,14 +623,14 @@ namespace fray
                     const auto parent = input.parent_path();
                     const auto originalArchive = inputArchive ? input : parent / (_name + ".fry");
                     const auto originalFolder = inputArchive ? parent / _name : input;
-                    const bool hasArchive = std::filesystem::exists(originalArchive, error);
+                    bool hasArchive = std::filesystem::exists(originalArchive, error);
                     if (error)
                     {
                         fray::log::engineError("Cannot inspect project archive: %s", error.message().c_str());
                         reset();
                         return fray::errors::FAILED_OPEN_PROJECT;
                     }
-                    const bool hasFolder = std::filesystem::exists(originalFolder, error);
+                    bool hasFolder = std::filesystem::exists(originalFolder, error);
                     if (error || (hasFolder && !std::filesystem::is_directory(originalFolder, error)))
                     {
                         fray::log::engineError("Cannot inspect project folder: %s", error.message().c_str());
@@ -331,34 +659,67 @@ namespace fray
                         reset();
                         return fray::errors::FAILED_OPEN_PROJECT;
                     }
+                    hasArchive = std::filesystem::exists(originalArchive, error);
+                    if (!error)
+                        hasFolder = std::filesystem::exists(originalFolder, error);
+                    if (error)
+                    {
+                        fray::log::engineError("Cannot inspect project after locking: %s", error.message().c_str());
+                        reset();
+                        return fray::errors::FAILED_OPEN_PROJECT;
+                    }
+                    if (hasArchive && hasFolder && choice == ConflictChoice::Ask)
+                    {
+                        reset();
+                        return fray::errors::PROJECT_CONFLICT;
+                    }
                     const bool useArchive = hasArchive && (!hasFolder || choice == ConflictChoice::Archive);
                     _archive = originalArchive;
                     _archiveExists = hasArchive;
                     _workspace = originalFolder;
                     if (hasArchive && hasFolder)
                     {
-                        const std::string suffix = useArchive ? ".archive" : ".recovered";
                         std::filesystem::path extra;
-                        if (!unusedPath(parent, _name + suffix, "", extra) ||
-                            !std::filesystem::create_directory(extra, error))
+                        if (!unusedPath(parent, _name + "-unselected", extra) ||
+                            !lockProject(extra.string() + ".fry", _extraLock))
                         {
-                            fray::log::engineError("Cannot create separate project directory: %s", error.message().c_str());
                             reset();
                             return fray::errors::FAILED_OPEN_PROJECT;
                         }
-                        _extraDirectory = extra;
-                        if (!lockProject(extra / (_name + ".fry"), _extraLock))
+                        const std::string newName = extra.filename().string();
+                        const auto source = useArchive ? originalFolder : originalArchive;
+                        const std::filesystem::path destination = useArchive
+                            ? extra : std::filesystem::path(extra.string() + ".fry");
+                        bool folderExists, archiveExists;
+                        if (!pathExists(extra, folderExists) ||
+                            !pathExists(extra.string() + ".fry", archiveExists) ||
+                            folderExists || archiveExists || !renameExclusive(source, destination))
+                        {
+                            fray::log::engineError("Cannot resolve project naming conflict.");
+                            reset();
+                            return fray::errors::FAILED_OPEN_PROJECT;
+                        }
+                        const bool renamedDatabase = useArchive
+                            ? renameFolderDatabase(destination, _name, newName)
+                            : renameArchiveDatabase(destination, _name, newName);
+                        if (!renamedDatabase)
+                        {
+                            if (!renameExclusive(destination, source))
+                                fray::log::engineError("Could not restore the original project path after rename failed.");
+                            reset();
+                            return fray::errors::FAILED_OPEN_PROJECT;
+                        }
+                        fray::log::engineInfo("Renamed %s to %s", source.string().c_str(),
+                                              destination.string().c_str());
+                        if (!unlockProject(_extraLock))
                         {
                             reset();
                             return fray::errors::FAILED_OPEN_PROJECT;
                         }
                         if (useArchive)
-                            _workspace = extra / _name;
+                            hasFolder = false;
                         else
-                        {
-                            _archive = extra / (_name + ".fry");
                             _archiveExists = false;
-                        }
                     }
                     if (useArchive)
                     {
@@ -367,6 +728,7 @@ namespace fray
                             reset();
                             return fray::errors::FAILED_OPEN_PROJECT;
                         }
+                        _extracted = true;
                     }
                     else if (!hasFolder && !std::filesystem::create_directory(_workspace, error))
                     {
@@ -457,8 +819,7 @@ namespace fray
                         fray::log::engineError("Cannot close project: project is closed or state is still open.");
                         return fray::errors::FAILED_CLOSE_PROJECT;
                     }
-                    reset();
-                    return fray::errors::NONE;
+                    return reset() ? fray::errors::NONE : fray::errors::FAILED_CLOSE_PROJECT;
                 }
 
             private:
@@ -507,13 +868,7 @@ namespace fray
                         }
                         protectedFolder = protectedFolder || contains(_workspace, homePath);
                     }
-                    const bool repository = std::filesystem::exists(_workspace / ".git", error);
-                    if (error)
-                    {
-                        fray::log::engineError("Cannot check project folder safety: %s", error.message().c_str());
-                        return fray::errors::FAILED_CLOSE_PROJECT;
-                    }
-                    if (protectedFolder || repository)
+                    if (protectedFolder)
                     {
                         fray::log::engineError("Project was archived, but the protected working folder was not removed: %s",
                                                _workspace.string().c_str());

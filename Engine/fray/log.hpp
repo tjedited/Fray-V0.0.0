@@ -7,7 +7,9 @@
 #include <ctime>
 #include <chrono>
 #include <string>
+#include <atomic>
 #include <cstdarg>
+#include <mutex>
 
 #include "types.hpp"
 #include "errors.hpp"
@@ -149,6 +151,16 @@ namespace fray
         }
 
         /**
+         * @brief Small sequential id for the calling thread, assigned on its first call (the first caller is 0).
+         */
+        inline F_long threadId()
+        {
+            static std::atomic<F_long> next{0};
+            thread_local const F_long id = next++;
+            return id;
+        }
+
+        /**
          * @brief Print a formatted log line with PID, level and colors.
          * @param PID PID label (e.g., "ENG", "ELC").
          * @param PIDColor ANSI color for PID.
@@ -166,10 +178,26 @@ namespace fray
             timeBuffer tb;
             getTime(tb);
 
-            std::printf("[%s] ", tb);
-            std::printf("[%s%s%s] ", PIDColor, PID, ANSI_RESET);
-            std::printf("[%s%s%s] ", levelColor, level, ANSI_RESET);
-            std::printf("%s\n", message);
+            // Build the whole line first and write it under a lock so threads cannot interleave.
+            std::string line = "[";
+            line += tb;
+            line += "] [T";
+            line += std::to_string(threadId());
+            line += "] [";
+            line += PIDColor;
+            line += PID;
+            line += ANSI_RESET;
+            line += "] [";
+            line += levelColor;
+            line += level;
+            line += ANSI_RESET;
+            line += "] ";
+            line += message;
+            line += '\n';
+
+            static std::mutex outputMutex;
+            std::lock_guard<std::mutex> lock(outputMutex);
+            std::fwrite(line.data(), 1, line.size(), stdout);
             std::fflush(stdout);
         }
 

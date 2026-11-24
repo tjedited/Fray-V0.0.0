@@ -25,7 +25,7 @@ else
     exit 1
 fi
 
-LIB_FLAGS="$LIB_FLAGS -lsqlite3 -lzip"
+LIB_FLAGS="$LIB_FLAGS -lsqlite3 -lzip -pthread"
 
 mkdir -p "$OUT_DIR"
 
