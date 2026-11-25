@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-#include "log.hpp"
+#include "log_manager.hpp"
 
 namespace fray
 {
@@ -163,6 +163,14 @@ namespace fray
 
                 ~ThreadManager()
                 {
+                    const std::vector<std::string> remaining = runningNames();
+                    if (!remaining.empty())
+                    {
+                        std::string names;
+                        for (const std::string& name : remaining)
+                            names += (names.empty() ? "" : ", ") + name;
+                        fray::log::engineWarn("Waiting on %zu thread(s) to finish: %s", remaining.size(), names.c_str());
+                    }
                     stopAll();
                     joinAll();
                 }
@@ -208,6 +216,17 @@ namespace fray
                         if (!entry.second.finished->load())
                             ++count;
                     return count;
+                }
+
+                // Names of the threads that are still running, to show what is holding up a shutdown.
+                std::vector<std::string> runningNames() const
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    std::vector<std::string> names;
+                    for (const auto& entry : _entries)
+                        if (!entry.second.finished->load())
+                            names.push_back(entry.second.name);
+                    return names;
                 }
 
                 void requestStop(Id id)

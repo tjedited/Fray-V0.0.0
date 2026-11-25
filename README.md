@@ -1,6 +1,95 @@
 # Fray V0.0.0
 A New Platform for Creatives & Developers
 
+## Engine and Electron messaging
+
+The Engine launches Electron. Each process uses its own built-in message router; Main does not register one. Electron
+process-specific code lives in `Electron/main/` and `Electron/renderer/`.
+Main owns a thread manager and separate network and message workers. Its message
+worker reads the prefix and forwards renderer-bound frames without decoding the
+header. Renderer-originated frames can be routed to Main or forwarded to the
+Engine. The narrow preload bridge carries frames across Electron IPC; the
+renderer has its own thread manager, message worker and router, and decodes
+headers for local messages. Main and the renderer exchange test frames on
+startup. The renderer's local handler currently logs messages; React plug-in
+dispatch is not yet implemented. Renderer console messages are forwarded to the
+terminal by Main.
+
+### Readiness
+
+No process assumes a startup order. A process is ready for another to send to it
+only after it has said so with `COMMAND_READY`, and a process that starts late
+can ask with `COMMAND_REQUEST_READY`. Both are sent to the broadcast destination
+(`PROCESS_KIND_BROADCAST`, every process except the sender) or to one process.
+
+- A request is sent once, at startup. A `READY` or a request never makes anyone
+  send another request.
+- A request is answered with a `READY` sent only to the requester, never
+  broadcast.
+- Each process keeps a table of which peers are ready and acts once, when a peer
+  becomes ready. The test frames between processes are sent on that transition.
+  Sending a non-readiness message to a peer that is not ready is logged and the
+  message is dropped, not queued.
+- Main is ready when it is connected to the Engine and announces itself then.
+  The renderer's only route to the others is Main, so it announces itself when it
+  hears that Main is ready. This is what makes either start order work.
+- The Engine never relays. Main delivers a broadcast to itself, the renderer and
+  the Engine, except to the sender.
+- Not yet implemented: a "stopping" announcement, and clearing the Engine's
+  table when a connection drops. Main clears its entries for the Engine and
+  renderer on disconnect, navigation or shutdown.
+
+Renderer thread state and readiness are reported to Main. Frames sent before
+the renderer is ready are logged and dropped, not queued. On a normal window
+close or app quit, Main requests renderer shutdown and waits for its registered
+workers to acknowledge shutdown before stopping its own IPC workers and sending
+the Engine a framed quit. Web Workers have no join API: the renderer terminates
+each worker after its shutdown acknowledgement. A failed worker, renderer crash
+or forced window destruction is reported as an unclean shutdown. A worker that
+does not acknowledge shutdown keeps the app waiting. Reload or navigation
+currently destroys renderer workers without coordinating shutdown and is logged;
+coordinated reload remains future work.
+
+Frames contain a fixed 23-byte routing prefix, a protobuf header and opaque
+payload bytes. Routing supports one renderer at destination ID 0; nonzero
+renderer IDs and other unsupported destinations are logged and dropped.
+Engine quit handling is in its router; Engine forwarding, plug-in routing,
+multi-window mapping and deduplication are not yet implemented. The current transport broadcasts Engine sends to connected
+clients. Renderer-to-Main routing currently requires the Engine IPC workers to
+be running. Electron IPC and preload may copy frame data; this has not yet been
+measured.
+JavaScript exposes the protobuf header's `messageId` and `timestamp` as decimal
+strings to preserve their full 64-bit values. The Engine currently listens on
+all network interfaces, and frame sizes are not yet capped; restrict access to
+trusted clients.
+
+The renderer's `renderer/message_schema.js` exports protobuf types and enums
+generated from `Schemas/fray.proto` by Vite. Generation runs on each build and
+the development server reloads when that schema changes. The static code works
+with the renderer's content security policy without `unsafe-eval`.
+The generated types can also be imported from renderer Web Workers:
+
+```js
+import { Header, PayloadType } from './message_schema';
+
+const bytes = Header.encode(Header.fromObject({
+  messageId: '18446744073709551615',
+  payloadType: PayloadType.PAYLOAD_TYPE_JSON,
+})).finish();
+const header = Header.toObject(Header.decode(bytes), { longs: String });
+```
+
+Run `node --test tests/renderer_schema_test.js` to check development and
+production generation, renderer and worker compatibility, and schema updates.
+Run `node --test tests/ipc_test.js tests/renderer_ipc_test.js` to exercise TCP,
+Electron IPC and coordinated shutdown, including an end-to-end exchange with
+the compiled Engine. The tests use `Engine/build/Darwin/engine` by default;
+set `FRAY_TEST_ENGINE` to use another build. The renderer IPC test uses port
+5173. Its Engine uses `--no-ui --test-renderer-ipc` to enable the same Engine
+startup test frame without launching a separate UI.
+Check Engine timestamp formatting with
+`g++ -std=c++17 tests/log_manager_test.cpp -o /tmp/fray-log-test && /tmp/fray-log-test`.
+
 ## Project and state management
 
 Each engine process has one `fray::FrayManager`, which can own multiple

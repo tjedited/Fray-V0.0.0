@@ -5,14 +5,16 @@
 
 #include "types.hpp"
 #include "errors.hpp"
-#include "log.hpp"
+#include "log_manager.hpp"
 #include "file_manager.hpp"
 #include "thread_manager.hpp"
 #include "file_watcher.hpp"
 #include "state_manager.hpp"
 #include "project_manager.hpp"
 #include "fray_manager.hpp"
-#include "ipc.hpp"
+#include "ipc_manager.hpp"
+#include "process_manager.hpp"
+#include "message.hpp"
 
 #define PROCESS_ID "Fray Engine"
 #define VERSION_MAJOR 0

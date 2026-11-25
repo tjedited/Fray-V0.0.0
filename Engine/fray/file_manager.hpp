@@ -16,7 +16,7 @@
 #include <zip.h>
 
 #include "errors.hpp"
-#include "log.hpp"
+#include "log_manager.hpp"
 
 #ifdef _WIN32
 #include <fcntl.h>

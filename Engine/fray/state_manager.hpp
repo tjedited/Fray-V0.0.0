@@ -18,7 +18,7 @@
 
 #include "types.hpp"
 #include "errors.hpp"
-#include "log.hpp"
+#include "log_manager.hpp"
 #include "file_manager.hpp"
 
 namespace fray

@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package fray;
+
+// Frame layout: [routing prefix (fixed binary)] [Header (this file)] [payload bytes].
+// The prefix and payload are not protobuf. Only the Header below is.
+
+// Kind of process or component a message is sent from or addressed to.
+// Used numerically in the routing prefix. Never reuse a number.
+enum ProcessKind {
+  PROCESS_KIND_UNSPECIFIED = 0;
+  PROCESS_KIND_ENGINE = 1;
+  PROCESS_KIND_ENGINE_PLUGIN = 2;
+  PROCESS_KIND_ELECTRON_MAIN = 3;
+  PROCESS_KIND_ELECTRON_RENDERER = 4;
+  PROCESS_KIND_ELECTRON_PLUGIN = 5;
+  // Destination only: every process except the sender. Never a sender.
+  PROCESS_KIND_BROADCAST = 6;
+}
+
+// How the payload bytes are encoded. CUSTOM means Fray's utilities cannot decode it.
+enum PayloadType {
+  PAYLOAD_TYPE_NONE = 0;
+  PAYLOAD_TYPE_PROTOBUF = 1;
+  PAYLOAD_TYPE_JSON = 2;
+  PAYLOAD_TYPE_CUSTOM = 3;
+}
+
+// Which schema to decode the payload with. Never reuse a number.
+enum MessageType {
+  MESSAGE_TYPE_NONE = 0;
+}
+
+// Initial core commands used by the Engine and Electron main process.
+enum Command {
+  COMMAND_UNSPECIFIED = 0;
+  COMMAND_TEST = 1;
+  COMMAND_QUIT = 2;
+  // "I can receive messages now." Sent to everyone when a process starts, or to one process as a reply.
+  COMMAND_READY = 3;
+  // "Tell me if you are ready." Sent once at startup. Answered with COMMAND_READY, sent only to the sender.
+  COMMAND_REQUEST_READY = 4;
+}
+
+message Header {
+  uint32 protocol_version = 1;
+  uint64 message_id = 2;        // Unique per sender
+  uint64 timestamp = 3;         // Sender clock, milliseconds since the Unix epoch
+  uint32 flags = 4;             // Reserved bits
+  string sender_name = 5;       // For logs and name-to-ID mapping
+  string destination_name = 6;  // For logs and name-to-ID mapping
+  optional string target_project = 7;
+  PayloadType payload_type = 8;
+  MessageType message_type = 9;
+}

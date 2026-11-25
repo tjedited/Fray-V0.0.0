@@ -2,7 +2,7 @@
   "name": "fray",
   "version": "0.0.0",
   "description": "A New Platform for Creatives & Developers",
-  "main": "main.js",
+  "main": "main/main.js",
   "scripts": {
     "vite": "vite",
     "electron": "wait-on http://localhost:5173 && electron .",
@@ -22,10 +22,12 @@
     "@vitejs/plugin-react": "^5.1.0",
     "concurrently": "^8.2.2",
     "electron": "^45.4.1",
+    "protobufjs-cli": "^2.7.1",
     "vite": "^6.4.1",
     "wait-on": "^9.0.1"
   },
   "dependencies": {
+    "protobufjs": "^8.8.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   }

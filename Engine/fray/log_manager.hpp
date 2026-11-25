@@ -1,7 +1,7 @@
-/* log.hpp */
+/* log_manager.hpp */
 
-#ifndef _FRAY_LOG_HPP_
-#define _FRAY_LOG_HPP_
+#ifndef _FRAY_LOG_MANAGER_HPP_
+#define _FRAY_LOG_MANAGER_HPP_
 
 #include <cstdio>
 #include <ctime>
@@ -81,14 +81,13 @@ namespace fray
         using timeBuffer = F_char[TIME_SIZE];
 
         /**
-         * @brief Write "[HH:MM:SS:ms] [YY.MM.DD]" into buffer.
+         * @brief Write "[HH:MM:SS:mmm] [YY.MM.DD]" into buffer.
          * @param timestamp Output buffer (>=32 bytes).
          */
-        inline F_void generateTimestamp(F_char *timestamp)
+        inline F_void generateTimestamp(F_char *timestamp, std::chrono::system_clock::time_point now = std::chrono::system_clock::now())
         {
             using namespace std::chrono;
-            auto now = system_clock::now();
-            auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 10000;
+            auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
 
             std::time_t t = system_clock::to_time_t(now);
             std::tm tm;
@@ -99,7 +98,7 @@ namespace fray
 #endif
 
             std::snprintf(
-                timestamp, 32, "[%02d:%02d:%02d:%04d] [%02d.%02d.%02d]",
+                timestamp, 32, "[%02d:%02d:%02d:%03d] [%02d.%02d.%02d]",
                 tm.tm_hour, tm.tm_min, tm.tm_sec,
                 static_cast<F_long>(ms.count()),
                 tm.tm_year % 100, tm.tm_mon + 1, tm.tm_mday);
@@ -127,14 +126,13 @@ namespace fray
         }
 
         /**
-         * @brief Write "HH:MM:SS.mmmm" into buffer.
+         * @brief Write "HH:MM:SS.mmm" into buffer.
          * @param time Output buffer (>=32 bytes).
          */
-        inline F_void getTime(F_char *time)
+        inline F_void getTime(F_char *time, std::chrono::system_clock::time_point now = std::chrono::system_clock::now())
         {
             using namespace std::chrono;
-            auto now = system_clock::now();
-            auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 10000;
+            auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
 
             std::time_t t = system_clock::to_time_t(now);
             std::tm tm;
@@ -145,7 +143,7 @@ namespace fray
 #endif
 
             std::snprintf(
-                time, 32, "%02d:%02d:%02d.%04d",
+                time, 32, "%02d:%02d:%02d.%03d",
                 tm.tm_hour, tm.tm_min, tm.tm_sec,
                 static_cast<int>(ms.count()));
         }

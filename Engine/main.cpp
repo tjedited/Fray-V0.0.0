@@ -8,14 +8,22 @@
 #include <string>
 #include <vector>
 
-F_err TCPMessageHandler(
-    std::string incomingMessage)
+static fray::ipc::Frame makeTestFrame(fray::ProcessKind destination)
 {
-    F_err err = fray::errors::NONE;
+    const auto frame = fray::message::makeEngineFrame(destination, 0, fray::COMMAND_TEST,
+        fray::PAYLOAD_TYPE_JSON, R"({"message":"Hello from the Engine"})");
+    if (!frame)
+        fray::log::engineError("Failed to build test message.");
+    return frame;
+}
 
-    fray::log::engineInfo("Message handler says, %s", incomingMessage.c_str());
-
-    return err;
+// Starts the UI and tells it which port the engine is listening on.
+static F_err launchElectron(const char* executable, F_ushort port)
+{
+    const std::filesystem::path electronDirectory =
+        (std::filesystem::absolute(executable).parent_path() / ".." / ".." / ".." / "Electron").lexically_normal();
+    return fray::process::spawn({"npm", "run", "start"}, electronDirectory,
+        {{"FRAY_ENGINE_PORT", std::to_string(port)}});
 }
 
 // Waits for an open to finish, then asks the user about any naming or database conflict.
@@ -60,14 +68,11 @@ static F_err finishOpening(fray::FrayManager& app, const std::string& name, std:
     return opened;
 }
 
-F_err main(
-    F_long argc,
-    F_char *argv[])
+// Terminal-driven multi-project demo. Not run while the UI connects over TCP.
+[[maybe_unused]] static F_err terminalDemo(fray::FrayManager& app)
 {
     F_err err = fray::errors::NONE;
     const std::vector<std::string> names = {"TestProjectA", "TestProjectB", "TestProjectC"};
-
-    fray::FrayManager app;
 
     // Start every open before waiting on any of them, so each project loads on its own thread.
     std::vector<std::future<F_err>> openings;
@@ -103,28 +108,53 @@ F_err main(
             fray::log::engineInfo("Project %s closed; working folder left unpackaged.", name.c_str());
     }
     return err;
+}
 
-    /*
-    F_err err = fray::errors::NONE;
-
+F_err main(
+    F_long argc,
+    F_char *argv[])
+{
+    bool launchUI = true;
+    bool testRendererIPC = false;
     fray::log::engineInfo("Receieved the following arguments:");
     for (F_long i = 0; i < argc; i++)
+    {
         fray::log::engineInfo(argv[i]);
+        if (std::string(argv[i]) == "--no-ui")
+            launchUI = false;
+        if (std::string(argv[i]) == "--test-renderer-ipc")
+            testRendererIPC = true;
+    }
+    if (testRendererIPC && launchUI)
+    {
+        fray::log::engineError("--test-renderer-ipc requires --no-ui.");
+        return fray::errors::FAILED_START;
+    }
 
     fray::log::engineInfo("Starting Engine.");
 
-    fray::ipc::IPCManager ipc;
+    // main owns the ThreadManager and declares it first, so it is destroyed last. Every engine thread
+    // registers here, and it names any thread still running when the engine exits.
+    fray::threads::ThreadManager threads;
+    fray::FrayManager app(threads);
+    fray::ipc::IPCManager ipc(threads);
 
-    // The TCP ownership needs to change here.
-    // IPCManager should be responsible for holding references to servers and trafficing messages between them.
-    // It can also destroy servers if no clients connect within a certain timespan.
-    ipc.createTCPServer(1234)->setMessageHandler(TCPMessageHandler);
-    // ipc.createTCPServer(2345);
-    // ipc.createTCPServer(3456);
+    // Port 0 lets the OS pick a free port, which Electron is told about when it is launched.
+    const auto server = ipc.createTCPServer(0);
+    // Peers announce when they are ready. The test messages go out as each one does, so nothing relies on timing.
+    ipc.setPeerReadyHandler([&ipc, sendRendererTest = launchUI || testRendererIPC](fray::ProcessKind peer) {
+        if (peer == fray::PROCESS_KIND_ELECTRON_MAIN || (peer == fray::PROCESS_KIND_ELECTRON_RENDERER && sendRendererTest))
+            if (const auto frame = makeTestFrame(peer))
+                ipc.sendToPeer(peer, frame);
+    });
+    ipc.start();
 
-    ipc.run();
+    if (launchUI)
+        ERR(launchElectron(argv[0], server->port()));
+
+    // The network and message threads do the work; main waits until the UI sends the quit command.
+    ipc.wait();
 
     fray::log::engineInfo("Exiting Engine.");
-    return 0;
-    */
+    return fray::errors::NONE;
 }

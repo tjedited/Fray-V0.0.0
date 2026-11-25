@@ -1,4 +1,4 @@
-/* log.js */
+/* log_manager.js */
 
 const ANSI_RESET = "\x1b[0m";
 const ANSI_FG_YELLOW = "\x1b[33m";
@@ -9,7 +9,7 @@ const ANSI_BG_RED = "\x1b[41m";
 const ANSI_BG_MAGENTA = "\x1b[45m";
 
 /**
- * Get the current time formatted as HH:MM:SS.mmmm.
+ * Get the current time formatted as HH:MM:SS.mmm.
  * @returns {string} The formatted time.
  */
 function getTime() {
@@ -17,7 +17,7 @@ function getTime() {
     const h = String(now.getHours()).padStart(2, '0');
     const m = String(now.getMinutes()).padStart(2, '0');
     const s = String(now.getSeconds()).padStart(2, '0');
-    const ms = String(now.getMilliseconds()).padStart(4, '0');
+    const ms = String(now.getMilliseconds()).padStart(3, '0');
     return `${h}:${m}:${s}.${ms}`;
 }
 

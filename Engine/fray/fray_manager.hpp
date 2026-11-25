@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -31,7 +32,10 @@ namespace fray
 
             inline static std::atomic<bool> _active{false};
             std::string _applicationId;
-            threads::ThreadManager _threads;
+            std::unique_ptr<threads::ThreadManager> _ownedThreads;
+            threads::ThreadManager* _threads;
+            threads::ThreadManager::Id _applicationThread = 0;
+            std::shared_ptr<threads::TaskQueue> _applicationQueue = std::make_shared<threads::TaskQueue>();
             std::mutex _mutex;
             std::unordered_map<std::string, Entry> _projects;
 
@@ -67,7 +71,7 @@ namespace fray
             void retire(Entry& entry)
             {
                 entry.queue->shutdown();
-                _threads.join(entry.thread);
+                _threads->join(entry.thread);
             }
 
             void rekey(const std::string& oldName, const std::string& newName)
@@ -87,12 +91,31 @@ namespace fray
                 _projects.insert(std::move(node));
             }
 
-        public:
-            explicit FrayManager(const std::string& applicationId = "Fray") : _applicationId(applicationId)
+            void init()
             {
                 bool expected = false;
                 if (!_active.compare_exchange_strong(expected, true))
                     throw std::logic_error("Only one FrayManager may exist in an engine process.");
+                // Runs application-level work so it never waits on a project or on message routing.
+                _applicationThread = _threads->spawn("application", [queue = _applicationQueue](threads::StopToken)
+                                                     { queue->run(); });
+            }
+
+        public:
+            // Uses its own ThreadManager, which is convenient for tests.
+            explicit FrayManager(const std::string& applicationId = "Fray")
+                : _applicationId(applicationId),
+                  _ownedThreads(std::make_unique<threads::ThreadManager>()),
+                  _threads(_ownedThreads.get())
+            {
+                init();
+            }
+
+            // Registers its threads with a ThreadManager owned by someone else, which must outlive this object.
+            explicit FrayManager(threads::ThreadManager& threads, const std::string& applicationId = "Fray")
+                : _applicationId(applicationId), _threads(&threads)
+            {
+                init();
             }
             FrayManager(const FrayManager&) = delete;
             FrayManager& operator=(const FrayManager&) = delete;
@@ -103,12 +126,19 @@ namespace fray
                     log::engineError("Some projects could not be closed; check their archives and working folders.");
                 for (auto& entry : _projects)
                     entry.second.queue->shutdown();
-                _threads.joinAll();
+                _applicationQueue->shutdown();
+                // Only this manager's own threads; the shared ThreadManager may hold others.
+                for (auto& entry : _projects)
+                    _threads->join(entry.second.thread);
+                _threads->join(_applicationThread);
                 _projects.clear();
                 _active = false;
             }
 
             const std::string& applicationId() const { return _applicationId; }
+
+            // Queues work for the application thread. Returns false once the manager is shutting down.
+            bool postApplication(std::function<void()> task) { return _applicationQueue->post(std::move(task)); }
 
             // Starts opening a project on a new thread of its own. The result is ready once the project
             // is open or needs a decision (PROJECT_CONFLICT, DATABASE_CONFLICT).
@@ -156,7 +186,7 @@ namespace fray
                 std::shared_ptr<threads::TaskQueue> queue = entry.queue;
                 project->beginOpening();
                 project->setRenameCallback([this](const std::string& from, const std::string& to) { rekey(from, to); });
-                entry.thread = _threads.spawn("project:" + name, [queue, project](threads::StopToken)
+                entry.thread = _threads->spawn("project:" + name, [queue, project](threads::StopToken)
                 {
                     queue->run([project] { return project->hasThreads(); });
                 });
@@ -166,7 +196,7 @@ namespace fray
                 }
                 return queue->call([this, project, queue, path, choice]
                 {
-                    const F_err result = project->open(path, _applicationId, choice, &_threads, queue);
+                    const F_err result = project->open(path, _applicationId, choice, _threads, queue);
                     if (result != errors::NONE && result != errors::DATABASE_CONFLICT)
                         queue->shutdown();
                     return result;

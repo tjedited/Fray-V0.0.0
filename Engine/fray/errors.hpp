@@ -29,7 +29,7 @@ namespace fray
     X(GENERAL, "General error.") \
     X(FAILED_SET_STATE, "Failed to update the state.") \
     X(INVALID_APPLICATION_ID, "Could not set the state application ID.") \
-    X(NO_MESSAGE_HANDLER, "The TCP server's messageHandlerP has not been set.") \
+    X(NO_MESSAGE_ROUTER, "The TCP server's message router has not been set.") \
     X(FAILED_START, "Failed to start the engine process.") \
     X(FAILED_OPEN_STORE, "Failed to open the store.") \
     X(FAILED_SAVE_STATE, "Failed to save the state.") \
@@ -47,7 +47,10 @@ namespace fray
     X(PROJECT_CONFLICT, "Both the project archive and working folder exist.") \
     X(PROJECT_ALREADY_OPEN, "A project with this name is already open.") \
     X(DATABASE_CONFLICT, "Multiple database files could be the project database.") \
-    X(FAILED_RENAME_PROJECT, "Failed to rename the project.")
+    X(FAILED_RENAME_PROJECT, "Failed to rename the project.") \
+    X(FAILED_SPAWN_PROCESS, "Failed to spawn the process.") \
+    X(INVALID_MESSAGE, "The message is malformed.") \
+    X(UNSUPPORTED_MESSAGE_VERSION, "The message prefix version is not supported.")
 
         enum code : F_err
         {
