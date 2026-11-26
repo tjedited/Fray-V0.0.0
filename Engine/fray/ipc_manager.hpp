@@ -366,9 +366,6 @@ namespace fray
                         item->set_depth(queue.depth);
                         item->set_oldest_age_ms(queue.oldestAgeMs);
                     }
-                    fray::log::engineInfo("Sending health report to %s: heartbeat=%llu processed=%llu queues=%d.",
-                        message::processName(prefix.senderKind), static_cast<unsigned long long>(_heartbeat),
-                        static_cast<unsigned long long>(_processedCount), report.queues_size());
                     send(message::makeEngineFrame(prefix.senderKind, prefix.senderId, COMMAND_PONG,
                         PAYLOAD_TYPE_PROTOBUF, report.SerializeAsString(), 0, MESSAGE_TYPE_HEALTH_REPORT));
                 }
@@ -387,14 +384,6 @@ namespace fray
                             report.processed_count(), report.progress_age_ms(), report.heartbeat(), {}};
                         for (const auto &queue : report.queues())
                             health.queues.push_back({queue.destination(), queue.depth(), queue.oldest_age_ms()});
-                        fray::log::engineInfo("Health report from %s: heartbeat=%llu processed=%llu progress_age_ms=%llu queues=%d.",
-                            message::processName(prefix.senderKind), static_cast<unsigned long long>(report.heartbeat()),
-                            static_cast<unsigned long long>(report.processed_count()),
-                            static_cast<unsigned long long>(report.progress_age_ms()), report.queues_size());
-                        for (const auto &queue : report.queues())
-                            fray::log::engineInfo("Health queue %s: depth=%llu oldest_age_ms=%llu.",
-                                message::processName(queue.destination()), static_cast<unsigned long long>(queue.depth()),
-                                static_cast<unsigned long long>(queue.oldest_age_ms()));
                         _monitor.report(prefix.senderKind, std::move(health));
                     }
                 }

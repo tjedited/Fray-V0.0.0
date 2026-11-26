@@ -288,8 +288,6 @@ test('Electron workers exchange frames with the Engine and shut down', { timeout
         assert.deepEqual(readyPeers, [message.ProcessKind.PROCESS_KIND_ENGINE]);
         await waitUntil(() => received.some((m) => m.prefix.commandId === message.Command.COMMAND_PING),
             'a periodic Engine PING', 3000);
-        await waitUntil(() => /Health report from Electron Main: heartbeat=[1-9]/.test(output),
-            'the Engine health report log', 3000);
         await waitUntil(() => received.some((m) => m.prefix.commandId === message.Command.COMMAND_PONG),
             'the Engine health report', 3000);
         const engineHealth = received.find((m) => m.prefix.commandId === message.Command.COMMAND_PONG);
@@ -297,7 +295,7 @@ test('Electron workers exchange frames with the Engine and shut down', { timeout
         const health = message.HealthReport.toObject(message.HealthReport.decode(engineHealth.payload),
             { defaults: true, longs: String });
         assert.ok(BigInt(health.heartbeat) > 0n);
-        assert.doesNotMatch(output, /Sending PING|Received frame: command=(?:5|6) /);
+        assert.doesNotMatch(output, /Sending PING|Received frame: command=(?:5|6) |Sending health report|Health report from|Health queue /);
         assert.match(output, /Electron Main is ready\./);
         const closeStarted = Date.now();
         await client.close(frame(message.Command.COMMAND_QUIT, Buffer.alloc(0), 79));

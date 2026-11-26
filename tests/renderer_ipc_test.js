@@ -237,13 +237,10 @@ test('real Engine and renderer exchange frames in both directions', { timeout: 3
                 'renderer frame at the Engine'),
             ...failures,
         ]);
-        await Promise.race([
-            waitFor(() => (engineOutput.match(/Health report from Electron Main:/g) || []).length >= 4,
-                'sustained health reports'),
-            ...failures,
-        ]);
+        await Promise.race([new Promise((resolve) => setTimeout(resolve, 4500)), ...failures]);
         assert.doesNotMatch(engineOutput + electronOutput, / is (?:DEGRADED|SUSPECT|DOWN)\./);
         assert.doesNotMatch(engineOutput + electronOutput, /Sending PING|received frame: command=(?:5|6) /i);
+        assert.doesNotMatch(engineOutput, /Sending health report|Health report from|Health queue /);
         electron.stdin.write('quit\n');
         const [[electronCode], [engineCode]] = await Promise.all([electronExit, engineExit]);
         assert.equal(electronCode, 0, electronOutput);

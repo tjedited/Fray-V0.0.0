@@ -71,9 +71,8 @@ not wait for a response.
 Each PONG carries a protobuf health report with the processed-message count,
 time since last progress, the main/UI-thread heartbeat, and outgoing queue
 depths and oldest-message ages. Heartbeats are posted locally to the router
-once per second. The Engine logs the reports it sends and receives.
-Routine PING/PONG frame logs are suppressed; readiness and health warnings
-remain visible.
+once per second. Routine PING/PONG and health report logs are suppressed;
+readiness and health warnings remain visible.
 
 The router marks a neighbor `DEGRADED` when its health report or heartbeat has
 not advanced for three seconds, or when it reports a nonempty queue whose
