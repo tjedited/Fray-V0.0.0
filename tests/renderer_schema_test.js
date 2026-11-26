@@ -34,13 +34,13 @@ test('renderer schema is regenerated and interoperates in development and produc
     const root = path.join(temp, 'Electron');
     const tempSchema = path.join(temp, 'Schemas', 'fray.proto');
     const outDir = path.join(temp, 'dist');
-    const configFile = path.join(root, 'vite.config.js');
+    const configFile = path.join(root, 'vite.config.ts');
     let server;
     let preview;
     try {
         await fs.mkdir(path.dirname(tempSchema), { recursive: true });
         await fs.mkdir(root, { recursive: true });
-        for (const file of ['vite.config.js', 'package.json', 'renderer/message_schema.js',
+        for (const file of ['vite.config.ts', 'vite.schema.ts', 'package.json', 'renderer/message_schema.ts', 'renderer/fray-schema.d.ts',
             'tests/schema_probe.html', 'tests/schema_probe.js', 'tests/schema_probe_worker.js']) {
             const target = path.join(root, file);
             await fs.mkdir(path.dirname(target), { recursive: true });
@@ -95,7 +95,7 @@ test('renderer schema is regenerated and interoperates in development and produc
         });
         await server.listen();
         const devUrl = `http://127.0.0.1:${server.httpServer.address().port}/tests/schema_probe.html`;
-        const transformed = await fetch(new URL('/renderer/message_schema.js', devUrl)).then((response) => response.text());
+        const transformed = await fetch(new URL('/renderer/message_schema.ts', devUrl)).then((response) => response.text());
         assert.match(transformed, /\/@id\/__x00__virtual:fray-schema/,
             `root=${server.config.root} plugins=${server.config.plugins.map((p) => p.name).join(',')} source=${transformed}`);
         await verify(devUrl, null);

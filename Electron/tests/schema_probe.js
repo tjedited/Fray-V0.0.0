@@ -1,4 +1,4 @@
-import { Header, ProcessKind, PayloadType, MessageType, Command } from '../renderer/message_schema.js';
+import { Header, ProcessKind, PayloadType, MessageType, Command } from '../renderer/message_schema';
 
 try {
   const hex = new URLSearchParams(location.search).get('header');

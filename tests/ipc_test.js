@@ -7,10 +7,10 @@ const { once } = require('node:events');
 const EventEmitter = require('node:events');
 const Module = require('node:module');
 const { test } = require('node:test');
-const { IPCManager, TCPClient } = require('../Electron/main/ipc_manager');
-const { ThreadManager } = require('../Electron/main/thread_manager');
-const message = require('../Electron/main/message');
-const log = require('../Electron/main/log_manager');
+const { IPCManager, TCPClient } = require('../Electron/dist-electron/ipc_manager');
+const { ThreadManager } = require('../Electron/dist-electron/thread_manager');
+const message = require('../Electron/dist-electron/message');
+const log = require('../Electron/dist-electron/log_manager');
 
 function frame(commandId, payload = Buffer.alloc(0), id = 1, destination = message.ProcessKind.PROCESS_KIND_ENGINE) {
     return message.buildFrame({
@@ -297,7 +297,8 @@ test('Electron worker threads disconnect on an invalid prefix or protobuf header
             message.encodePrefix({ destinationKind: message.ProcessKind.PROCESS_KIND_ELECTRON_MAIN,
                 senderKind: 1, length: 1, headerLength: 1 }),
             Buffer.from([0x80]),
-        ])]) {
+        ]), message.encodePrefix({ destinationKind: message.ProcessKind.PROCESS_KIND_ELECTRON_MAIN,
+            senderKind: 1, length: message.MAX_FRAME_LENGTH + 1, headerLength: 1 })]) {
             const connection = once(server, 'connection');
             const threads = new ThreadManager();
             const client = new IPCManager('127.0.0.1', server.address().port, threads);
@@ -312,6 +313,14 @@ test('Electron worker threads disconnect on an invalid prefix or protobuf header
     } finally {
         await new Promise((resolve) => server.close(resolve));
     }
+});
+
+test('frames over the maximum size are refused when built or parsed', () => {
+    const header = { messageId: 1, senderName: 'Test' };
+    assert.throws(() => message.buildFrame({ destinationKind: 1, senderKind: 3 }, header,
+        Buffer.alloc(message.MAX_FRAME_LENGTH)), /maximum/);
+    assert.throws(() => message.decodePrefix(message.encodePrefix({ destinationKind: 1, senderKind: 3,
+        length: message.MAX_FRAME_LENGTH + 1, headerLength: 1 })), /maximum/);
 });
 
 test('Electron main sends a test frame and a framed quit', { timeout: 10000 }, async () => {
@@ -358,15 +367,15 @@ test('Electron main sends a test frame and a framed quit', { timeout: 10000 }, a
         return originalLoad.call(this, request, ...args);
     };
     try {
-        require('../Electron/main/main');
+        require('../Electron/dist-electron/main');
     } finally {
         Module._load = originalLoad;
         if (originalPort === undefined) delete process.env.FRAY_ENGINE_PORT;
         else process.env.FRAY_ENGINE_PORT = originalPort;
     }
     const [socket] = await connection;
-    assert.equal(require.resolve('../Electron'), require.resolve('../Electron/main/main'));
-    assert.equal(windowOptions.webPreferences.preload, path.join(__dirname, '../Electron/main/preload.js'));
+    assert.equal(require.resolve('../Electron'), require.resolve('../Electron/dist-electron/main'));
+    assert.equal(windowOptions.webPreferences.preload, path.join(__dirname, '../Electron/dist-electron/preload.js'));
     assert.equal(fs.existsSync(windowOptions.webPreferences.preload), true);
     assert.equal(windowUrl, 'http://localhost:5173');
     let data = Buffer.alloc(0);

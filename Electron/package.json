@@ -2,11 +2,15 @@
   "name": "fray",
   "version": "0.0.0",
   "description": "A New Platform for Creatives & Developers",
-  "main": "main/main.js",
+  "main": "dist-electron/main.js",
   "scripts": {
     "vite": "vite",
+    "build": "npm run build:main && npm run build:renderer",
+    "build:main": "vite build -c vite.main.config.ts && vite build -c vite.preload.config.ts",
+    "build:renderer": "vite build",
+    "typecheck": "tsc -p tsconfig.main.json && tsc -p tsconfig.renderer.json",
     "electron": "wait-on http://localhost:5173 && electron .",
-    "start": "concurrently --kill-others \"npm run vite\" \"npm run electron\""
+    "start": "npm run build:main && concurrently --kill-others \"npm run vite\" \"npm run electron\""
   },
   "repository": {
     "type": "git",
@@ -19,10 +23,14 @@
   },
   "homepage": "https://github.com/tjedited/Fray-V0.0.0#readme",
   "devDependencies": {
+    "@types/node": "^26.6.11",
+    "@types/react": "^19.3.3",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.1.0",
     "concurrently": "^8.2.2",
     "electron": "^45.4.1",
     "protobufjs-cli": "^2.7.1",
+    "typescript": "^7.0.2",
     "vite": "^6.4.1",
     "wait-on": "^9.0.1"
   },

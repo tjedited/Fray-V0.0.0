@@ -63,13 +63,13 @@ strings to preserve their full 64-bit values. The Engine currently listens on
 all network interfaces, and frame sizes are not yet capped; restrict access to
 trusted clients.
 
-The renderer's `renderer/message_schema.js` exports protobuf types and enums
+The renderer's `renderer/message_schema.ts` exports protobuf types and enums
 generated from `Schemas/fray.proto` by Vite. Generation runs on each build and
 the development server reloads when that schema changes. The static code works
 with the renderer's content security policy without `unsafe-eval`.
 The generated types can also be imported from renderer Web Workers:
 
-```js
+```ts
 import { Header, PayloadType } from './message_schema';
 
 const bytes = Header.encode(Header.fromObject({
@@ -78,6 +78,27 @@ const bytes = Header.encode(Header.fromObject({
 })).finish();
 const header = Header.toObject(Header.decode(bytes), { longs: String });
 ```
+
+## Electron TypeScript and builds
+
+The Engine and native plug-ins are C++. Everything under `Electron/` is
+TypeScript: Electron Main, the preload script and their worker threads in
+`Electron/main/`, the React renderer and its worker in `Electron/renderer/`,
+and types shared by all of them in `Electron/shared/types.ts` (including the
+`FrayBridge` interface behind `window.frayBridge`).
+
+Vite compiles it back to JavaScript. `npm run build:main` writes Main, its
+workers and the preload script to `Electron/dist-electron/` as CommonJS (one
+file per module, plus a single self-contained `preload.js`, since the sandboxed
+preload cannot load other files). `package.json` points `main` at
+`dist-electron/main.js`. The renderer is served by `vite` in development and
+built into `Electron/dist/` by `npm run build:renderer`; `npm run build` does
+both. `npm run start` builds Main first, so rerun it after editing Main code.
+`npm run typecheck` checks Main and the renderer with `tsc` (both use strict
+mode; Vite itself only strips types and does not check them).
+
+The IPC tests load the compiled Main code, so run `npm run build:main` in
+`Electron/` before them.
 
 Run `node --test tests/renderer_schema_test.js` to check development and
 production generation, renderer and worker compatibility, and schema updates.

@@ -14,7 +14,7 @@ ipcMain.on('fray:renderer-state', (_event, state) => {
 require('node:readline').createInterface({ input: process.stdin }).on('line', async (command) => {
     if (command === 'send') {
         try {
-            await contents.executeJavaScript(`import('/message.js').then(({ buildFrame, ProcessKind }) => {
+            await contents.executeJavaScript(`import('/message.ts').then(({ buildFrame, ProcessKind }) => {
                 window.frayBridge.sendFrame(buildFrame({
                     destinationKind: ProcessKind.PROCESS_KIND_ENGINE,
                     senderKind: ProcessKind.PROCESS_KIND_ELECTRON_RENDERER,
@@ -39,4 +39,4 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', as
     }
 });
 
-require('../main/main.js');
+require('../dist-electron/main.js');

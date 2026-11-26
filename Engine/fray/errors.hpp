@@ -50,6 +50,7 @@ namespace fray
     X(FAILED_RENAME_PROJECT, "Failed to rename the project.") \
     X(FAILED_SPAWN_PROCESS, "Failed to spawn the process.") \
     X(INVALID_MESSAGE, "The message is malformed.") \
+    X(MESSAGE_TOO_LARGE, "The message exceeds the maximum frame size.") \
     X(UNSUPPORTED_MESSAGE_VERSION, "The message prefix version is not supported.")
 
         enum code : F_err

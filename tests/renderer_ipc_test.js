@@ -7,11 +7,18 @@ const { test } = require('node:test');
 const { pathToFileURL } = require('node:url');
 const fs = require('node:fs/promises');
 const os = require('node:os');
-const message = require('../Electron/main/message');
+const message = require('../Electron/dist-electron/message');
+
+// Requests the renderer entry so Vite finishes optimizing dependencies before Electron loads the page.
+// Otherwise a cold cache makes Vite reload the page just after it starts.
+async function warmUp(server) {
+    await fetch(new URL('main.tsx', server.resolvedUrls.local[0]));
+    await server.waitForRequestsIdle();
+}
 
 for (const mode of ['development', 'production']) test(`real ${mode} renderer exchanges framed messages and stops its worker`, { timeout: 30000 }, async () => {
     const vite = await import(pathToFileURL(require.resolve('../Electron/node_modules/vite')).href);
-    const configFile = path.join(__dirname, '../Electron/vite.config.js');
+    const configFile = path.join(__dirname, '../Electron/vite.config.ts');
     const tcp = net.createServer();
     let server;
     let outputDirectory;
@@ -30,6 +37,7 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
         if (mode === 'development') {
             server = await vite.createServer({ configFile, logLevel: 'silent', server: { port: 5173, strictPort: true } });
             await server.listen();
+            await warmUp(server);
         } else {
             outputDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'fray-renderer-ipc-'));
             await vite.build({ configFile, logLevel: 'silent', build: { outDir: outputDirectory, emptyOutDir: true } });
@@ -126,7 +134,7 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
 test('real Engine and renderer exchange frames in both directions', { timeout: 30000 }, async () => {
     const vite = await import(pathToFileURL(require.resolve('../Electron/node_modules/vite')).href);
     const server = await vite.createServer({
-        configFile: path.join(__dirname, '../Electron/vite.config.js'),
+        configFile: path.join(__dirname, '../Electron/vite.config.ts'),
         logLevel: 'silent', server: { port: 5173, strictPort: true },
     });
     const enginePath = process.env.FRAY_TEST_ENGINE || path.join(__dirname, '../Engine/build/Darwin/engine');
@@ -154,6 +162,7 @@ test('real Engine and renderer exchange frames in both directions', { timeout: 3
     }
     try {
         await server.listen();
+        await warmUp(server);
         engine = spawn(enginePath, ['--no-ui', '--test-renderer-ipc'], { stdio: ['ignore', 'pipe', 'pipe'] });
         const engineExit = once(engine, 'exit');
         watch(engine.stdout, (data) => { engineOutput += data; });
@@ -216,7 +225,7 @@ test('real Engine and renderer exchange frames in both directions', { timeout: 3
 test('renderer that starts before the Engine link announces itself once the link is up', { timeout: 30000 }, async () => {
     const vite = await import(pathToFileURL(require.resolve('../Electron/node_modules/vite')).href);
     const server = await vite.createServer({
-        configFile: path.join(__dirname, '../Electron/vite.config.js'),
+        configFile: path.join(__dirname, '../Electron/vite.config.ts'),
         logLevel: 'silent', server: { port: 5173, strictPort: true },
     });
     const tcp = net.createServer();
@@ -225,6 +234,7 @@ test('renderer that starts before the Engine link announces itself once the link
     let output = '';
     try {
         await server.listen();
+        await warmUp(server);
         // Reserve a port, then release it so Electron's first connection attempts are refused.
         tcp.listen(0, '127.0.0.1');
         await once(tcp, 'listening');

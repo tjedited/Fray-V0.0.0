@@ -26,6 +26,8 @@ namespace fray
     {
         constexpr F_uchar PREFIX_VERSION = 1;
         constexpr size_t PREFIX_SIZE = 23;
+        // Largest allowed value of the prefix length field (header + payload). Checked before any buffer is allocated.
+        constexpr F_ulong MAX_FRAME_LENGTH = 16 * 1024 * 1024;
 
         // All integers are big-endian on the wire. Layout:
         //  0 version | 1 destinationKind | 2-5 destinationId | 6 senderKind | 7-10 senderId
@@ -100,6 +102,8 @@ namespace fray
             p.headerLength = detail::get32(data + 19);
             if (p.headerLength > p.length)
                 return errors::INVALID_MESSAGE;
+            if (p.length > MAX_FRAME_LENGTH)
+                return errors::MESSAGE_TOO_LARGE;
 
             out = p;
             return errors::NONE;
@@ -113,6 +117,8 @@ namespace fray
             if (headerSize > static_cast<size_t>(std::numeric_limits<int>::max()) ||
                 payloadSize > UINT32_MAX - headerSize || (payloadSize && !payload))
                 return errors::INVALID_MESSAGE;
+            if (headerSize + payloadSize > MAX_FRAME_LENGTH)
+                return errors::MESSAGE_TOO_LARGE;
 
             prefix.length = static_cast<F_ulong>(headerSize + payloadSize);
             prefix.headerLength = static_cast<F_ulong>(headerSize);

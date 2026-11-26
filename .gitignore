@@ -36,4 +36,4 @@ electron-packager/
 *.exe
 *.AppImage
 *.deb
-*.rpm
+*.rpmdist-electron/
