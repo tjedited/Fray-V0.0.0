@@ -9,15 +9,18 @@
 #include <vector>
 #include <algorithm>
 #include <deque>
+#include <condition_variable>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <limits>
 #include <string>
 #include "errors.hpp"
 #include "log_manager.hpp"
 #include "message.hpp"
 #include "message_router.hpp"
-#include "readiness.hpp"
+#include "neighbor_monitor.hpp"
+#include "outgoing_router.hpp"
 #include "thread_manager.hpp"
 #include "types.hpp"
 
@@ -96,13 +99,52 @@ namespace fray
         {
         private:
             boost::asio::io_context _io;
+            boost::asio::steady_timer _monitorTimer{_io};
             std::vector<TCPServerSP> _servers;
             threads::TaskQueue _messages;
             bool _started = false;
             threads::ThreadManager::Id _networkThread = 0;
             threads::ThreadManager::Id _messageThread = 0;
-            routing::PeerReadiness _peers;
-            std::function<void(ProcessKind)> _onPeerReady;
+            std::mutex _networkMutex;
+            std::condition_variable _networkWake;
+            bool _networkStopped = false;
+            uint64_t _heartbeat = 0;
+            uint64_t _processedCount = 0;
+            std::chrono::steady_clock::time_point _lastProgress = std::chrono::steady_clock::now();
+            // Owned by the engine message thread, which is the router: nothing else may touch it.
+            routing::OutgoingRouter<ProcessKind, Frame> _outgoing{
+                [this](ProcessKind, const Frame &frame) { transmit(frame); }};
+            routing::NeighborMonitor<ProcessKind> _monitor{
+                [this](ProcessKind neighbor, routing::MonitorCommand command)
+                {
+                    const auto id = command == routing::MonitorCommand::probe ? COMMAND_REQUEST_READY : COMMAND_PING;
+                    if (command == routing::MonitorCommand::probe)
+                        fray::log::engineInfo("Sending readiness probe to %s.", message::processName(neighbor));
+                    send(message::makeEngineFrame(neighbor, 0, id));
+                },
+                [this](ProcessKind neighbor) { return _outgoing.state(neighbor); },
+                [this](ProcessKind neighbor, routing::NeighborState state)
+                {
+                    if (state == routing::NeighborState::ready)
+                    {
+                        const auto previous = _outgoing.state(neighbor);
+                        if (_outgoing.markReady(neighbor) &&
+                            (previous == routing::NeighborState::suspect || previous == routing::NeighborState::degraded ||
+                             previous == routing::NeighborState::down))
+                            fray::log::engineInfo("%s recovered and is ready.", message::processName(neighbor));
+                    }
+                    else
+                    {
+                        _outgoing.setState(neighbor, state);
+                        if (state == routing::NeighborState::down || state == routing::NeighborState::unreachable)
+                            _outgoing.discardQueue(neighbor);
+                        if (state == routing::NeighborState::probing) return;
+                        const char *name = state == routing::NeighborState::suspect ? "SUSPECT" :
+                            state == routing::NeighborState::degraded ? "DEGRADED" :
+                            state == routing::NeighborState::down ? "DOWN" : "UNREACHABLE";
+                        fray::log::engineWarn("%s is %s.", message::processName(neighbor), name);
+                    }
+                }};
             // Declared last so any threads it owns are joined before anything they use is destroyed.
             std::unique_ptr<threads::ThreadManager> _ownedThreads;
             threads::ThreadManager *_threads;
@@ -159,6 +201,7 @@ namespace fray
                 if (_servers.empty())
                 {
                     fray::log::engineInfo("No servers remaining; stopping io_context.");
+                    _monitorTimer.cancel();
                     _io.stop();
                 }
             }
@@ -171,13 +214,52 @@ namespace fray
                 _started = true;
                 _messageThread = _threads->spawn("engine-messages", [this](threads::StopToken)
                                                 { _messages.run(); });
+                _messages.post([this] { _monitor.start(PROCESS_KIND_ELECTRON_MAIN); });
+                scheduleMonitor();
                 _networkThread = _threads->spawn("network", [this](threads::StopToken)
-                                                { _io.run(); });
+                {
+                    try { _io.run(); }
+                    catch (...) { networkFinished(); throw; }
+                    networkFinished();
+                });
+            }
+
+            F_void networkFinished()
+            {
+                {
+                    std::lock_guard<std::mutex> lock(_networkMutex);
+                    _networkStopped = true;
+                }
+                _networkWake.notify_all();
+            }
+
+            F_void scheduleMonitor()
+            {
+                _monitorTimer.expires_after(std::chrono::seconds(1));
+                _monitorTimer.async_wait([this](const boost::system::error_code &error)
+                {
+                    if (error == boost::asio::error::operation_aborted) return;
+                    if (error)
+                    {
+                        fray::log::engineError("Monitor timer failed: %s", error.message().c_str());
+                        return;
+                    }
+                    _messages.post([this] { _outgoing.sweep(); _monitor.tick(); });
+                    scheduleMonitor();
+                });
             }
 
             // Blocks until every server has stopped and the queued messages have been handled.
             F_void wait()
             {
+                {
+                    std::unique_lock<std::mutex> lock(_networkMutex);
+                    while (!_networkStopped)
+                    {
+                        _messages.post([this] { ++_heartbeat; });
+                        _networkWake.wait_for(lock, std::chrono::seconds(1), [this] { return _networkStopped; });
+                    }
+                }
                 _threads->join(_networkThread);
                 _messages.shutdown();
                 _threads->join(_messageThread);
@@ -194,22 +276,10 @@ namespace fray
                             s->stop(); });
             }
 
-            // Called on the engine message thread each time a peer goes from not ready to ready.
-            // Set it before start().
-            F_void setPeerReadyHandler(std::function<void(ProcessKind)> handler) { _onPeerReady = std::move(handler); }
-
-            // Sends to one peer only if it has announced that it is ready. Otherwise the message is dropped, not queued.
-            F_void sendToPeer(ProcessKind peer, Frame frame)
-            {
-                if (!_peers.isReady(peer))
-                {
-                    fray::log::engineWarn("Cannot send to %s: it has not said it is ready.", message::processName(peer));
-                    return;
-                }
-                send(std::move(frame));
-            }
-
-            // Sends a message to every connected client. Safe from any thread.
+            // Hands a message to the router and returns at once. Safe from any thread.
+            // The router delivers it now if its destination is ready, otherwise it waits in that destination's queue
+            // for as long as the header's ttl_ms allows (0 = until the destination is ready).
+            // Nothing is sent back to the caller either way.
             F_void send(Frame frame)
             {
                 if (!frame)
@@ -217,6 +287,39 @@ namespace fray
                     fray::log::engineError("Cannot send an empty frame pointer.");
                     return;
                 }
+                if (!_messages.post([this, frame = std::move(frame)]() { route(frame); }))
+                    fray::log::engineError("Cannot send message: message thread is shutting down.");
+            }
+
+            // Router thread only. Readiness messages and broadcasts always go out at once, because they are how
+            // readiness is learned and who is reachable is not known yet. Everything else goes through the outgoing queue.
+            F_void route(const Frame &frame)
+            {
+                message::InData outgoing;
+                const F_err err = message::parseFrame(frame, outgoing);
+                if (err != fray::errors::NONE)
+                {
+                    fray::log::engineError("Cannot send message: %s", fray::errors::description(err));
+                    return;
+                }
+                const auto &prefix = outgoing.prefix;
+                if (prefix.commandId != COMMAND_READY && prefix.commandId != COMMAND_REQUEST_READY &&
+                    prefix.commandId != COMMAND_PING && prefix.commandId != COMMAND_PONG)
+                {
+                    ++_processedCount;
+                    _lastProgress = std::chrono::steady_clock::now();
+                }
+                if (prefix.destinationKind == PROCESS_KIND_BROADCAST || prefix.commandId == COMMAND_READY ||
+                    prefix.commandId == COMMAND_REQUEST_READY || prefix.commandId == COMMAND_PING ||
+                    prefix.commandId == COMMAND_PONG)
+                    transmit(frame);
+                else if (!_outgoing.send(prefix.destinationKind, frame, outgoing.header.ttl_ms()))
+                    fray::log::engineInfo("%s is not ready; the message is waiting.", message::processName(prefix.destinationKind));
+            }
+
+            // Writes a frame to every connected client. Safe from any thread.
+            F_void transmit(Frame frame)
+            {
                 boost::asio::post(_io, [this, frame = std::move(frame)]()
                                   {
                     for (const auto &s : _servers)
@@ -224,8 +327,8 @@ namespace fray
                             s->broadcast(frame); });
             }
 
-            // A READY marks the sender ready. A REQUEST_READY is answered with a READY sent back to the sender only,
-            // so no peer ever has to announce to everyone because someone else asked.
+            // A READY marks the sender ready and delivers whatever was waiting for it. A REQUEST_READY is answered with
+            // a READY sent back to the sender only, so no peer ever has to announce to everyone because someone else asked.
             F_void handleReadiness(const message::InData &incoming)
             {
                 const auto &prefix = incoming.prefix;
@@ -233,17 +336,70 @@ namespace fray
                     return;
                 if (prefix.commandId == COMMAND_READY)
                 {
-                    if (_peers.markReady(prefix.senderKind))
+                    const bool wasReady = _outgoing.isReady(prefix.senderKind);
+                    _monitor.observe(prefix.senderKind, true);
+                    // Answer a newly ready neighbor with our own READY so it need not ask. Only a change triggers it, so
+                    // the exchange ends after one reply each way.
+                    if (_outgoing.state(prefix.senderKind) != routing::NeighborState::degraded)
+                        _outgoing.markReady(prefix.senderKind);
+                    if (!wasReady && _outgoing.isReady(prefix.senderKind))
                     {
                         fray::log::engineInfo("%s is ready.", message::processName(prefix.senderKind));
-                        if (_onPeerReady)
-                            _onPeerReady(prefix.senderKind);
+                        send(message::makeEngineFrame(prefix.senderKind, prefix.senderId, COMMAND_READY));
                     }
                 }
                 else if (prefix.commandId == COMMAND_REQUEST_READY)
                 {
                     send(message::makeEngineFrame(prefix.senderKind, prefix.senderId, COMMAND_READY));
                 }
+                else if (prefix.commandId == COMMAND_PING)
+                {
+                    HealthReport report;
+                    report.set_processed_count(_processedCount);
+                    report.set_heartbeat(_heartbeat);
+                    report.set_progress_age_ms(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - _lastProgress).count());
+                    for (const auto &queue : _outgoing.queueHealth())
+                    {
+                        auto *item = report.add_queues();
+                        item->set_destination(queue.destination);
+                        item->set_depth(queue.depth);
+                        item->set_oldest_age_ms(queue.oldestAgeMs);
+                    }
+                    fray::log::engineInfo("Sending health report to %s: heartbeat=%llu processed=%llu queues=%d.",
+                        message::processName(prefix.senderKind), static_cast<unsigned long long>(_heartbeat),
+                        static_cast<unsigned long long>(_processedCount), report.queues_size());
+                    send(message::makeEngineFrame(prefix.senderKind, prefix.senderId, COMMAND_PONG,
+                        PAYLOAD_TYPE_PROTOBUF, report.SerializeAsString(), 0, MESSAGE_TYPE_HEALTH_REPORT));
+                }
+                else if (prefix.commandId == COMMAND_PONG)
+                {
+                    HealthReport report;
+                    if (incoming.header.payload_type() != PAYLOAD_TYPE_PROTOBUF ||
+                        incoming.header.message_type() != MESSAGE_TYPE_HEALTH_REPORT ||
+                        !report.ParseFromArray(incoming.payload(), static_cast<int>(incoming.payloadSize())))
+                    {
+                        fray::log::engineError("Invalid health report from %s.", message::processName(prefix.senderKind));
+                    }
+                    else
+                    {
+                        routing::NeighborMonitor<ProcessKind>::HealthReport health{
+                            report.processed_count(), report.progress_age_ms(), report.heartbeat(), {}};
+                        for (const auto &queue : report.queues())
+                            health.queues.push_back({queue.destination(), queue.depth(), queue.oldest_age_ms()});
+                        fray::log::engineInfo("Health report from %s: heartbeat=%llu processed=%llu progress_age_ms=%llu queues=%d.",
+                            message::processName(prefix.senderKind), static_cast<unsigned long long>(report.heartbeat()),
+                            static_cast<unsigned long long>(report.processed_count()),
+                            static_cast<unsigned long long>(report.progress_age_ms()), report.queues_size());
+                        for (const auto &queue : report.queues())
+                            fray::log::engineInfo("Health queue %s: depth=%llu oldest_age_ms=%llu.",
+                                message::processName(queue.destination()), static_cast<unsigned long long>(queue.depth()),
+                                static_cast<unsigned long long>(queue.oldest_age_ms()));
+                        _monitor.report(prefix.senderKind, std::move(health));
+                    }
+                }
+                if (prefix.commandId != COMMAND_READY)
+                    _monitor.observe(prefix.senderKind, false);
             }
 
             // Called by the network thread: queues a received message for the engine message thread.
@@ -264,10 +420,17 @@ namespace fray
                     err = message::parseFrame(frame, incoming);
                     if (err != fray::errors::NONE)
                         fray::log::engineError("Message processing failed: %s", fray::errors::description(err));
-                    else if (routing::handleEngineMessage(incoming) == routing::Action::stop)
-                        stop();
                     else
-                        handleReadiness(incoming); }))
+                    {
+                        if (prefix.commandId != COMMAND_READY && prefix.commandId != COMMAND_REQUEST_READY &&
+                            prefix.commandId != COMMAND_PING && prefix.commandId != COMMAND_PONG)
+                        {
+                            ++_processedCount;
+                            _lastProgress = std::chrono::steady_clock::now();
+                        }
+                        if (routing::handleEngineMessage(incoming) == routing::Action::stop) stop();
+                        else handleReadiness(incoming);
+                    } }))
                     fray::log::engineError("Cannot queue message: message thread is shutting down.");
             }
         };

@@ -106,6 +106,14 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
                 Buffer.from([0, 1, 128, 255]));
             child.stdin.write(`sendhex ${frame.toString('hex')}\n`);
         }
+        // The Engine has not said it is ready, so the routers hold the renderer's message instead of sending it.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.equal(received.some((frame) => frame.prefix.commandId === 77), false, output);
+        socket.write(message.buildFrame({
+            destinationKind: message.ProcessKind.PROCESS_KIND_BROADCAST,
+            senderKind: message.ProcessKind.PROCESS_KIND_ENGINE,
+            commandId: message.Command.COMMAND_READY,
+        }, { senderName: 'Engine', messageId: 3 }));
         for (let attempt = 0; attempt < 100 && !received.some((frame) => frame.prefix.commandId === 77); attempt++)
             await new Promise((resolve) => setTimeout(resolve, 20));
         const outgoing = received.find((frame) => frame.prefix.commandId === 77);
@@ -113,6 +121,29 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
         assert.equal(outgoing.prefix.senderKind, message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
         assert.equal(outgoing.header.messageId, '18446744073709551615');
         assert.deepEqual(outgoing.payload, Buffer.from([0, 1, 128, 255]));
+
+        socket.write(message.buildFrame({
+            destinationKind: message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER,
+            senderKind: message.ProcessKind.PROCESS_KIND_ENGINE,
+            commandId: message.Command.COMMAND_PING,
+        }, { senderName: 'Engine', messageId: 4 }));
+        for (let attempt = 0; attempt < 100 && !received.some((frame) =>
+            frame.prefix.commandId === message.Command.COMMAND_PONG &&
+            frame.prefix.senderKind === message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER); attempt++)
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        const rendererPong = received.find((frame) => frame.prefix.commandId === message.Command.COMMAND_PONG &&
+            frame.prefix.senderKind === message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+        assert.ok(rendererPong, output);
+        assert.equal(rendererPong.header.messageType, message.MessageType.MESSAGE_TYPE_HEALTH_REPORT);
+        const health = message.HealthReport.toObject(message.HealthReport.decode(rendererPong.payload),
+            { defaults: true, longs: String });
+        assert.ok(BigInt(health.heartbeat) > 0n);
+
+        if (mode === 'development') {
+            child.stdin.write('block-ui\n');
+            await Promise.race([waitFor('Electron Renderer is SUSPECT.'), failOnExit]);
+            await Promise.race([waitFor('UI_BLOCK_END'), failOnExit]);
+        }
 
         child.stdin.write('quit\n');
         const [code] = await exited;
@@ -206,6 +237,13 @@ test('real Engine and renderer exchange frames in both directions', { timeout: 3
                 'renderer frame at the Engine'),
             ...failures,
         ]);
+        await Promise.race([
+            waitFor(() => (engineOutput.match(/Health report from Electron Main:/g) || []).length >= 4,
+                'sustained health reports'),
+            ...failures,
+        ]);
+        assert.doesNotMatch(engineOutput + electronOutput, / is (?:DEGRADED|SUSPECT|DOWN)\./);
+        assert.doesNotMatch(engineOutput + electronOutput, /Sending PING|received frame: command=(?:5|6) /i);
         electron.stdin.write('quit\n');
         const [[electronCode], [engineCode]] = await Promise.all([electronExit, engineExit]);
         assert.equal(electronCode, 0, electronOutput);

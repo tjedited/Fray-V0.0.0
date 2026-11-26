@@ -5,7 +5,6 @@ import * as log from './log_manager';
 import { IPCManager } from './ipc_manager';
 import { ThreadManager } from './thread_manager';
 import * as message from './message';
-import { PeerReadiness, handleReadiness } from './readiness';
 import type { RendererState } from '../shared/types';
 
 const { ProcessKind } = message;
@@ -19,8 +18,8 @@ const threads = new ThreadManager();
 let ipc: IPCManager | null = null;
 let shuttingDown = false;
 let shutdownComplete = false;
+// Main and its message worker use odd and even IDs respectively.
 let nextMessageId = 1;
-const peers = new PeerReadiness();
 let window: BrowserWindow | null = null;
 let rendererState: RendererState | 'gone' = 'starting';
 let rendererThreads: string[] = [];
@@ -36,7 +35,7 @@ function makeFrame(commandId: number, payload: Buffer = Buffer.alloc(0), destina
     commandId,
   }, {
     protocolVersion: 1,
-    messageId: nextMessageId++,
+    messageId: (nextMessageId += 2) - 2,
     timestamp: Date.now(),
     senderName: message.processName(SELF),
     destinationName: message.processName(destinationKind),
@@ -44,40 +43,28 @@ function makeFrame(commandId: number, payload: Buffer = Buffer.alloc(0), destina
   }, payload);
 }
 
-// Sends to one peer whether or not it has said it is ready. Used for readiness messages themselves.
-function sendToPeer(kind: number, frame: Buffer): void {
-  if (kind === ProcessKind.PROCESS_KIND_ENGINE) {
-    if (ipc && ipc.connected && !shuttingDown) ipc.send(frame);
-    else log.electronWarn('Cannot send to the Engine: TCP client is not connected.');
-  } else if (kind === ProcessKind.PROCESS_KIND_ELECTRON_RENDERER) {
-    sendToRenderer(frame);
-  }
-}
-
-// Everything else waits for the peer to say it is ready. Messages to a peer that is not ready are dropped, not queued.
-function sendToReadyPeer(kind: number, frame: Buffer): void {
-  if (!peers.isReady(kind)) {
-    log.electronWarn('Cannot send to %s: it has not said it is ready.', message.processName(kind));
+// Hands a frame to the router thread, which sends it when its destination is ready and holds it until then.
+function send(frame: Buffer): void {
+  if (!ipc || shuttingDown) {
+    log.electronWarn('Cannot send: IPC is not available.');
     return;
   }
-  sendToPeer(kind, frame);
-}
-
-// Reaches every peer that can currently be reached. Peers that are not up yet will ask for readiness when they start.
-function broadcast(frame: Buffer): void {
-  if (ipc && ipc.connected && !shuttingDown) ipc.send(frame);
-  if (rendererState === 'ready') sendToRenderer(frame);
+  try {
+    ipc.send(frame);
+  } catch (error) {
+    log.electronWarn('Cannot send: %s', (error as Error).message);
+  }
 }
 
 function announceReady(): void {
-  broadcast(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
-  broadcast(makeFrame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
+  send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
+  send(makeFrame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
 }
 
 function sendTestFrame(kind: number): void {
   const payload = kind === ProcessKind.PROCESS_KIND_ENGINE
     ? Buffer.from(JSON.stringify({ message: 'Hello from Electron Main' })) : Buffer.alloc(0);
-  sendToReadyPeer(kind, makeFrame(message.Command.COMMAND_TEST, payload, kind));
+  send(makeFrame(message.Command.COMMAND_TEST, payload, kind));
 }
 
 function connectToEngine(): void {
@@ -89,30 +76,37 @@ function connectToEngine(): void {
   ipc = new IPCManager('127.0.0.1', enginePort, threads);
   // Electron Main is ready once it is connected to the Engine, because that link is how everyone else reaches it.
   ipc.on('connected', () => {
-    if (!shuttingDown) announceReady();
+    if (shuttingDown) return;
+    announceReady();
+    // Each test frame waits in the router's queue until its peer says it is ready.
+    sendTestFrame(ProcessKind.PROCESS_KIND_ENGINE);
+    sendTestFrame(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
   });
-  ipc.on('disconnected', () => peers.markNotReady(ProcessKind.PROCESS_KIND_ENGINE));
+  // A neighbor that has just become ready is answered with our own READY, so it need not ask. Only a change triggers
+  // this, so the exchange ends after one reply each way. Until connected, Main is not ready and announces on connect.
+  ipc.on('peer-ready', (kind) => {
+    log.electronInfo('%s is ready.', message.processName(kind));
+    if (ipc && ipc.connected) send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), kind));
+  });
   ipc.on('message', ({ prefix, header, payload }) => {
-    log.electronInfo('Received frame: command=%d sender=%s destination=%s protocol=%d message_id=%s timestamp=%s flags=%d payload_type=%d message_type=%d payload_bytes=%d frame_bytes=%d.',
-      prefix.commandId, header.senderName, header.destinationName, header.protocolVersion, header.messageId,
-      header.timestamp, header.flags, header.payloadType, header.messageType, payload.length,
-      message.PREFIX_SIZE + prefix.length);
-    handleReadiness(prefix, SELF, peers, {
-      reply: (kind, id) => {
-        if (ipc && ipc.connected) sendToPeer(kind, makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), kind, id));
-      },
-      onPeerReady: (kind) => {
-        log.electronInfo('%s is ready.', message.processName(kind));
-        sendTestFrame(kind);
-      },
-    });
+    if (prefix.commandId !== message.Command.COMMAND_PING && prefix.commandId !== message.Command.COMMAND_PONG)
+      log.electronInfo('Received frame: command=%d sender=%s destination=%s protocol=%d message_id=%s timestamp=%s flags=%d payload_type=%d message_type=%d payload_bytes=%d frame_bytes=%d.',
+        prefix.commandId, header.senderName, header.destinationName, header.protocolVersion, header.messageId,
+        header.timestamp, header.flags, header.payloadType, header.messageType, payload.length,
+        message.PREFIX_SIZE + prefix.length);
+    // A request is answered with a READY sent back to the requester only.
+    const sender = prefix.senderKind;
+    if (prefix.commandId === message.Command.COMMAND_REQUEST_READY && sender !== SELF &&
+        sender !== ProcessKind.PROCESS_KIND_BROADCAST && ipc && ipc.connected)
+      send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), sender, prefix.senderId));
   });
-  ipc.on('renderer-frame', (frame) => sendToRenderer(frame));
+  ipc.on('renderer-frame', (frame, broadcast) => sendToRenderer(frame, broadcast));
 }
 
-function sendToRenderer(frame: Uint8Array | ArrayBuffer): void {
+// A broadcast reaches whoever can be reached, so a renderer that is not ready is skipped without a warning.
+function sendToRenderer(frame: Uint8Array | ArrayBuffer, broadcast = false): void {
   if (!window || window.isDestroyed() || rendererState !== 'ready' || shuttingDown) {
-    log.electronWarn('Cannot forward frame: renderer is not ready.');
+    if (!broadcast) log.electronWarn('Cannot forward frame: renderer is not ready.');
     return;
   }
   window.webContents.send('fray:frame', new Uint8Array(frame));
@@ -158,7 +152,7 @@ ipcMain.on('fray:renderer-state', (event, report: { state: RendererState; thread
     return;
   }
   rendererState = report.state;
-  if (rendererState !== 'ready') peers.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+  if (rendererState !== 'ready') ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
   rendererThreads = report.threads;
   if (rendererState === 'stopped') {
     if (rendererThreads.length) {
@@ -198,7 +192,7 @@ const createWindow = (): void => {
   win.webContents.on('render-process-gone', (_event, details) => {
     log.electronError('Renderer process exited (%s); its threads could not report a clean shutdown.', details.reason);
     rendererState = 'gone';
-    peers.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+    ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
     resolveRendererStopped();
   });
   win.webContents.on('did-start-navigation', (_event, _url, isSameDocument, isMainFrame) => {
@@ -206,7 +200,7 @@ const createWindow = (): void => {
     if (rendererState !== 'starting' && rendererState !== 'stopped' && rendererState !== 'gone')
       log.electronWarn('Renderer navigated without a coordinated worker shutdown.');
     rendererState = 'starting';
-    peers.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+    ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
     rendererThreads = [];
     rendererShutdownRequested = false;
   });

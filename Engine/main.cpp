@@ -141,12 +141,10 @@ F_err main(
 
     // Port 0 lets the OS pick a free port, which Electron is told about when it is launched.
     const auto server = ipc.createTCPServer(0);
-    // Peers announce when they are ready. The test messages go out as each one does, so nothing relies on timing.
-    ipc.setPeerReadyHandler([&ipc, sendRendererTest = launchUI || testRendererIPC](fray::ProcessKind peer) {
-        if (peer == fray::PROCESS_KIND_ELECTRON_MAIN || (peer == fray::PROCESS_KIND_ELECTRON_RENDERER && sendRendererTest))
-            if (const auto frame = makeTestFrame(peer))
-                ipc.sendToPeer(peer, frame);
-    });
+    // The test messages are sent now. Each waits in the router's queue until its peer announces that it is ready.
+    ipc.send(makeTestFrame(fray::PROCESS_KIND_ELECTRON_MAIN));
+    if (launchUI || testRendererIPC)
+        ipc.send(makeTestFrame(fray::PROCESS_KIND_ELECTRON_RENDERER));
     ipc.start();
 
     if (launchUI)

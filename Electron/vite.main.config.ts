@@ -16,8 +16,10 @@ export default defineConfig({
     lib: {
       entry: Object.fromEntries([
         'main', 'ipc_manager', 'log_manager', 'message', 'message_router', 'message_worker',
-        'network_worker', 'readiness', 'thread_manager',
-      ].map((name) => [name, main(name)])),
+        'network_worker', 'thread_manager',
+      ].map((name) => [name, main(name)]).concat([
+        ['outgoing_router', fileURLToPath(new URL('./shared/outgoing_router.ts', import.meta.url))],
+      ])),
       formats: ['cjs'],
       fileName: (_format, name) => `${name}.js`,
     },

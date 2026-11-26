@@ -156,9 +156,11 @@ namespace fray
         }
 
         // Builds a complete frame sent by the engine. destinationId 0 means the default instance.
+        // ttlMs is how long a router may hold the message while its destination is not ready; 0 means forever.
         inline std::shared_ptr<const std::vector<F_uchar>> makeEngineFrame(
             ProcessKind destination, F_ulong destinationId, F_ulong command,
-            PayloadType payloadType = PAYLOAD_TYPE_NONE, const std::string &payload = "")
+            PayloadType payloadType = PAYLOAD_TYPE_NONE, const std::string &payload = "", uint32_t ttlMs = 0,
+            MessageType messageType = MESSAGE_TYPE_NONE)
         {
             Prefix prefix;
             prefix.destinationKind = destination;
@@ -173,6 +175,8 @@ namespace fray
             header.set_sender_name(processName(PROCESS_KIND_ENGINE));
             header.set_destination_name(processName(destination));
             header.set_payload_type(payloadType);
+            header.set_message_type(messageType);
+            header.set_ttl_ms(ttlMs);
             auto frame = std::make_shared<std::vector<F_uchar>>();
             const F_err err = buildFrame(prefix, header, reinterpret_cast<const F_uchar *>(payload.data()),
                                          payload.size(), *frame);

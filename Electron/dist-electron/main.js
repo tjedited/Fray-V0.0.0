@@ -5,7 +5,6 @@ const log_manager = require("./log_manager.js");
 const ipc_manager = require("./ipc_manager.js");
 const thread_manager = require("./thread_manager.js");
 const message = require("./message.js");
-const readiness = require("./readiness.js");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -32,7 +31,6 @@ let ipc = null;
 let shuttingDown = false;
 let shutdownComplete = false;
 let nextMessageId = 1;
-const peers = new readiness.PeerReadiness();
 let window = null;
 let rendererState = "starting";
 let rendererThreads = [];
@@ -49,39 +47,31 @@ function makeFrame(commandId, payload = Buffer.alloc(0), destinationKind = Proce
     commandId
   }, {
     protocolVersion: 1,
-    messageId: nextMessageId++,
+    messageId: (nextMessageId += 2) - 2,
     timestamp: Date.now(),
     senderName: message.processName(SELF),
     destinationName: message.processName(destinationKind),
     payloadType: payload.length ? message.PayloadType.PAYLOAD_TYPE_JSON : message.PayloadType.PAYLOAD_TYPE_NONE
   }, payload);
 }
-function sendToPeer(kind, frame) {
-  if (kind === ProcessKind.PROCESS_KIND_ENGINE) {
-    if (ipc && ipc.connected && !shuttingDown) ipc.send(frame);
-    else log_manager.electronWarn("Cannot send to the Engine: TCP client is not connected.");
-  } else if (kind === ProcessKind.PROCESS_KIND_ELECTRON_RENDERER) {
-    sendToRenderer(frame);
-  }
-}
-function sendToReadyPeer(kind, frame) {
-  if (!peers.isReady(kind)) {
-    log_manager.electronWarn("Cannot send to %s: it has not said it is ready.", message.processName(kind));
+function send(frame) {
+  if (!ipc || shuttingDown) {
+    log_manager.electronWarn("Cannot send: IPC is not available.");
     return;
   }
-  sendToPeer(kind, frame);
-}
-function broadcast(frame) {
-  if (ipc && ipc.connected && !shuttingDown) ipc.send(frame);
-  if (rendererState === "ready") sendToRenderer(frame);
+  try {
+    ipc.send(frame);
+  } catch (error) {
+    log_manager.electronWarn("Cannot send: %s", error.message);
+  }
 }
 function announceReady() {
-  broadcast(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
-  broadcast(makeFrame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
+  send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
+  send(makeFrame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
 }
 function sendTestFrame(kind) {
   const payload = kind === ProcessKind.PROCESS_KIND_ENGINE ? Buffer.from(JSON.stringify({ message: "Hello from Electron Main" })) : Buffer.alloc(0);
-  sendToReadyPeer(kind, makeFrame(message.Command.COMMAND_TEST, payload, kind));
+  send(makeFrame(message.Command.COMMAND_TEST, payload, kind));
 }
 function connectToEngine() {
   if (!enginePort) {
@@ -91,39 +81,40 @@ function connectToEngine() {
   log_manager.electronInfo("Starting IPC threads.");
   ipc = new ipc_manager.IPCManager("127.0.0.1", enginePort, threads);
   ipc.on("connected", () => {
-    if (!shuttingDown) announceReady();
+    if (shuttingDown) return;
+    announceReady();
+    sendTestFrame(ProcessKind.PROCESS_KIND_ENGINE);
+    sendTestFrame(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
   });
-  ipc.on("disconnected", () => peers.markNotReady(ProcessKind.PROCESS_KIND_ENGINE));
+  ipc.on("peer-ready", (kind) => {
+    log_manager.electronInfo("%s is ready.", message.processName(kind));
+    if (ipc && ipc.connected) send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), kind));
+  });
   ipc.on("message", ({ prefix, header, payload }) => {
-    log_manager.electronInfo(
-      "Received frame: command=%d sender=%s destination=%s protocol=%d message_id=%s timestamp=%s flags=%d payload_type=%d message_type=%d payload_bytes=%d frame_bytes=%d.",
-      prefix.commandId,
-      header.senderName,
-      header.destinationName,
-      header.protocolVersion,
-      header.messageId,
-      header.timestamp,
-      header.flags,
-      header.payloadType,
-      header.messageType,
-      payload.length,
-      message.PREFIX_SIZE + prefix.length
-    );
-    readiness.handleReadiness(prefix, SELF, peers, {
-      reply: (kind, id) => {
-        if (ipc && ipc.connected) sendToPeer(kind, makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), kind, id));
-      },
-      onPeerReady: (kind) => {
-        log_manager.electronInfo("%s is ready.", message.processName(kind));
-        sendTestFrame(kind);
-      }
-    });
+    if (prefix.commandId !== message.Command.COMMAND_PING && prefix.commandId !== message.Command.COMMAND_PONG)
+      log_manager.electronInfo(
+        "Received frame: command=%d sender=%s destination=%s protocol=%d message_id=%s timestamp=%s flags=%d payload_type=%d message_type=%d payload_bytes=%d frame_bytes=%d.",
+        prefix.commandId,
+        header.senderName,
+        header.destinationName,
+        header.protocolVersion,
+        header.messageId,
+        header.timestamp,
+        header.flags,
+        header.payloadType,
+        header.messageType,
+        payload.length,
+        message.PREFIX_SIZE + prefix.length
+      );
+    const sender = prefix.senderKind;
+    if (prefix.commandId === message.Command.COMMAND_REQUEST_READY && sender !== SELF && sender !== ProcessKind.PROCESS_KIND_BROADCAST && ipc && ipc.connected)
+      send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), sender, prefix.senderId));
   });
-  ipc.on("renderer-frame", (frame) => sendToRenderer(frame));
+  ipc.on("renderer-frame", (frame, broadcast) => sendToRenderer(frame, broadcast));
 }
-function sendToRenderer(frame) {
+function sendToRenderer(frame, broadcast = false) {
   if (!window || window.isDestroyed() || rendererState !== "ready" || shuttingDown) {
-    log_manager.electronWarn("Cannot forward frame: renderer is not ready.");
+    if (!broadcast) log_manager.electronWarn("Cannot forward frame: renderer is not ready.");
     return;
   }
   window.webContents.send("fray:frame", new Uint8Array(frame));
@@ -165,7 +156,7 @@ electron.ipcMain.on("fray:renderer-state", (event, report) => {
     return;
   }
   rendererState = report.state;
-  if (rendererState !== "ready") peers.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+  if (rendererState !== "ready") ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
   rendererThreads = report.threads;
   if (rendererState === "stopped") {
     if (rendererThreads.length) {
@@ -204,7 +195,7 @@ const createWindow = () => {
   win.webContents.on("render-process-gone", (_event, details) => {
     log_manager.electronError("Renderer process exited (%s); its threads could not report a clean shutdown.", details.reason);
     rendererState = "gone";
-    peers.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+    ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
     resolveRendererStopped();
   });
   win.webContents.on("did-start-navigation", (_event, _url, isSameDocument, isMainFrame) => {
@@ -212,7 +203,7 @@ const createWindow = () => {
     if (rendererState !== "starting" && rendererState !== "stopped" && rendererState !== "gone")
       log_manager.electronWarn("Renderer navigated without a coordinated worker shutdown.");
     rendererState = "starting";
-    peers.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+    ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
     rendererThreads = [];
     rendererShutdownRequested = false;
   });

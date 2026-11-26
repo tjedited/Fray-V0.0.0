@@ -29,6 +29,7 @@ enum PayloadType {
 // Which schema to decode the payload with. Never reuse a number.
 enum MessageType {
   MESSAGE_TYPE_NONE = 0;
+  MESSAGE_TYPE_HEALTH_REPORT = 1;
 }
 
 // Initial core commands used by the Engine and Electron main process.
@@ -38,8 +39,10 @@ enum Command {
   COMMAND_QUIT = 2;
   // "I can receive messages now." Sent to everyone when a process starts, or to one process as a reply.
   COMMAND_READY = 3;
-  // "Tell me if you are ready." Sent once at startup. Answered with COMMAND_READY, sent only to the sender.
+  // "Tell me if you are ready." Answered with COMMAND_READY, sent only to the sender.
   COMMAND_REQUEST_READY = 4;
+  COMMAND_PING = 5;
+  COMMAND_PONG = 6;
 }
 
 message Header {
@@ -52,4 +55,20 @@ message Header {
   optional string target_project = 7;
   PayloadType payload_type = 8;
   MessageType message_type = 9;
+  // How long, in milliseconds, a router may hold this message in its outgoing queue waiting for the
+  // destination to be ready. The countdown starts when each router queues it. 0 = never expires.
+  uint32 ttl_ms = 10;
+}
+
+message QueueHealth {
+  ProcessKind destination = 1;
+  uint64 depth = 2;
+  uint64 oldest_age_ms = 3;
+}
+
+message HealthReport {
+  uint64 processed_count = 1;
+  uint64 progress_age_ms = 2;
+  uint64 heartbeat = 3;
+  repeated QueueHealth queues = 4;
 }

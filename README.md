@@ -22,25 +22,71 @@ only after it has said so with `COMMAND_READY`, and a process that starts late
 can ask with `COMMAND_REQUEST_READY`. Both are sent to the broadcast destination
 (`PROCESS_KIND_BROADCAST`, every process except the sender) or to one process.
 
-- A request is sent once, at startup. A `READY` or a request never makes anyone
-  send another request.
+- Requests are sent at startup and once per second while probing a neighbor.
 - A request is answered with a `READY` sent only to the requester, never
   broadcast.
-- Each process keeps a table of which peers are ready and acts once, when a peer
-  becomes ready. The test frames between processes are sent on that transition.
-  Sending a non-readiness message to a peer that is not ready is logged and the
-  message is dropped, not queued.
+- A `READY` from a neighbor that was not marked ready is answered with a
+  `READY` sent only to that neighbor, so a process that starts late does not
+  have to ask. Only that change triggers an answer, so the exchange ends after
+  one `READY` each way.
+- The router thread in each process owns the table of which neighbors are ready
+  (the Engine's message thread, and the message workers in Main and the
+  renderer). Nothing else reads it. Other threads learn of a change through a
+  message, such as the renderer's UI thread hearing that Main is ready.
+- Sending is one call, `send()`, which hands the message to the router and
+  returns at once. The router sends it now if its destination is ready and
+  otherwise keeps it in that destination's outgoing queue, in order, until the
+  destination says it is ready. Nothing is reported back to the sender. Readiness
+  messages and broadcasts are never held, because they are how readiness is
+  learned and who can be reached is not known.
+- Each message says how long it may wait, in `Header.ttl_ms`: 0 means until the
+  destination is ready, anything else is a number of milliseconds counted from
+  when a router queues it (so each router on the path restarts the count). The
+  sender sets it when building the frame. Expired messages are dropped when the
+  queue is flushed, the router next queues something, or its timer ticks.
+- Queues have no size limit yet. A queue is discarded with `discardQueue` when a
+  monitored neighbor is declared down or unreachable. Messages wait again when
+  a neighbor is suspect or merely stops being ready.
 - Main is ready when it is connected to the Engine and announces itself then.
   The renderer's only route to the others is Main, so it announces itself when it
   hears that Main is ready. This is what makes either start order work.
 - The Engine never relays. Main delivers a broadcast to itself, the renderer and
   the Engine, except to the sender.
 - Not yet implemented: a "stopping" announcement, and clearing the Engine's
-  table when a connection drops. Main clears its entries for the Engine and
-  renderer on disconnect, navigation or shutdown.
+  table immediately when a connection drops. The Engine detects silence through
+  its monitoring timer; Main clears its entries for the Engine and renderer on
+  disconnect, navigation or shutdown.
 
-Renderer thread state and readiness are reported to Main. Frames sent before
-the renderer is ready are logged and dropped, not queued. On a normal window
+Each router monitors its currently implemented immediate neighbors: Engine
+monitors Main, Main monitors Engine and the renderer, and the renderer monitors
+Main. Unavailable plug-ins are not probed. Every second, a router probes a
+neighbor until it announces `READY` or the 10-second budget expires. A late
+`READY` can still restore it. Once ready, routers exchange `PING` and `PONG`;
+any received frame resets the local silence timer. Three seconds of silence
+marks the neighbor suspect, and ten seconds marks it down. Ordinary messages
+queue while a neighbor is suspect or down; control messages bypass the queue.
+Further traffic restores a previously ready neighbor. Timers are local and do
+not wait for a response.
+
+Each PONG carries a protobuf health report with the processed-message count,
+time since last progress, the main/UI-thread heartbeat, and outgoing queue
+depths and oldest-message ages. Heartbeats are posted locally to the router
+once per second. The Engine logs the reports it sends and receives.
+Routine PING/PONG frame logs are suppressed; readiness and health warnings
+remain visible.
+
+The router marks a neighbor `DEGRADED` when its health report or heartbeat has
+not advanced for three seconds, or when it reports a nonempty queue whose
+processed count has not advanced for three seconds. Ordinary messages wait
+until the neighbor recovers. With the current transport, a blocked Main or
+renderer UI thread can also prevent the router's report from getting out:
+its neighbor sees silence and marks it `SUSPECT` or `DOWN` instead. These
+checks do not restart processes. Per-plug-in heartbeats are not implemented
+because the plug-in system does not yet exist; the orphan watchdog and
+supervisor are also deferred.
+
+Renderer thread state and readiness are reported to Main. Frames for the
+renderer wait in Main's outgoing queue until it says it is ready. On a normal window
 close or app quit, Main requests renderer shutdown and waits for its registered
 workers to acknowledge shutdown before stopping its own IPC workers and sending
 the Engine a framed quit. Web Workers have no join API: the renderer terminates
@@ -108,6 +154,9 @@ the compiled Engine. The tests use `Engine/build/Darwin/engine` by default;
 set `FRAY_TEST_ENGINE` to use another build. The renderer IPC test uses port
 5173. Its Engine uses `--no-ui --test-renderer-ipc` to enable the same Engine
 startup test frame without launching a separate UI.
+Run `node --test tests/outgoing_router_test.js` for the outgoing queue logic, and
+`g++ -std=c++17 -IEngine tests/outgoing_router_test.cpp -o /tmp/fray-router-test && /tmp/fray-router-test`
+for its Engine counterpart.
 Check Engine timestamp formatting with
 `g++ -std=c++17 tests/log_manager_test.cpp -o /tmp/fray-log-test && /tmp/fray-log-test`.
 

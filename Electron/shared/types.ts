@@ -36,6 +36,8 @@ export interface HeaderFields {
   targetProject?: string;
   payloadType?: number;
   messageType?: number;
+  /** How long a router may hold the message while its destination is not ready, in milliseconds. 0 = forever. */
+  ttlMs?: number;
 }
 
 /** A decoded fray.Header (defaults filled in, 64-bit integers as strings). */
@@ -49,6 +51,7 @@ export interface DecodedHeader {
   targetProject?: string;
   payloadType: number;
   messageType: number;
+  ttlMs: number;
 }
 
 /** What a handler receives for every frame addressed to this process. */
@@ -69,10 +72,4 @@ export interface FrayBridge {
   onFrame(handler: (frame: Uint8Array) => void): () => void;
   /** Returns a function that removes the handler. */
   onShutdown(handler: () => void): () => void;
-}
-
-/** Callbacks the readiness handler uses to act on what it hears. */
-export interface ReadinessActions {
-  reply(kind: number, id: number): void;
-  onPeerReady(kind: number): void;
 }

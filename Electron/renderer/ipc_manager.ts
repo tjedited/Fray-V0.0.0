@@ -8,6 +8,7 @@ export class IPCManager {
   private closePromise?: Promise<void>;
   private readonly threads: ThreadManager;
   private readonly worker: Worker;
+  private readonly heartbeatTimer: number;
   private readonly removeFrame: () => void;
   private readonly removeShutdown: () => void;
 
@@ -15,6 +16,7 @@ export class IPCManager {
     private readonly bridge: FrayBridge,
     onMessage: (message: IncomingMessage<Uint8Array>) => void,
     onReady: () => void = () => {},
+    onPeerReady: (kind: number) => void = () => {},
   ) {
     this.threads = new ThreadManager((names) => bridge.reportState(
       this.closing ? 'stopping' : this.ready ? 'ready' : 'starting', names));
@@ -26,6 +28,10 @@ export class IPCManager {
       throw error;
     }
     this.worker = this.threads.spawn('renderer-messages', worker);
+    let heartbeat = 0;
+    const beat = () => this.worker.postMessage({ type: 'heartbeat', heartbeat: ++heartbeat });
+    beat();
+    this.heartbeatTimer = window.setInterval(beat, 1000);
     this.worker.addEventListener('message', ({ data }) => {
       if (data.type === 'ready') {
         if (this.closing) return;
@@ -36,6 +42,10 @@ export class IPCManager {
         const frame = new Uint8Array(data.frame);
         onMessage({ prefix: data.prefix, header: data.header,
           payload: frame.subarray(PREFIX_SIZE + data.prefix.headerLength) });
+      } else if (data.type === 'outgoing') {
+        if (!this.closing) bridge.sendFrame(new Uint8Array(data.frame));
+      } else if (data.type === 'peer-ready') {
+        onPeerReady(data.kind);
       } else if (data.type === 'error') {
         console.error(`Message thread: ${data.message}`);
       }
@@ -57,14 +67,18 @@ export class IPCManager {
     });
   }
 
+  // Hands a frame to the router thread and returns at once. The router sends it now if its destination is ready,
+  // and otherwise holds it until the destination is ready or the header's ttlMs runs out. Nothing comes back.
   send(frame: Uint8Array): void {
     if (this.closing) throw new Error('Cannot send: renderer IPC is closing.');
-    this.bridge.sendFrame(frame);
+    const bytes = Uint8Array.from(frame);
+    this.worker.postMessage({ type: 'send', frame: bytes.buffer }, [bytes.buffer]);
   }
 
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
+    clearInterval(this.heartbeatTimer);
     this.closePromise = (async () => {
       await this.threads.stopAll();
       this.removeFrame();

@@ -5,7 +5,10 @@ import { TCPClient } from './ipc_manager';
 const parent = parentPort!;
 const routerPort: MessagePort = workerData.routerPort;
 const client = new TCPClient(workerData.host, workerData.port, 10000, 500, {
-    onConnect: () => parent.postMessage({ type: 'connected' }),
+    onConnect: () => {
+        parent.postMessage({ type: 'connected' });
+        routerPort.postMessage({ type: 'connected' });
+    },
     onFrame: (frame: Buffer) => routerPort.postMessage({ type: 'frame', frame: frame.buffer }, [frame.buffer as ArrayBuffer]),
     onError: (error: string) => parent.postMessage({ type: 'error', message: error }),
     onClose: () => {

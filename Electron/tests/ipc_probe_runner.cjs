@@ -34,6 +34,12 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', as
             console.error(`PROBE_ERROR:${error.message}`);
             app.exit(1);
         }
+    } else if (command === 'block-ui') {
+        await contents.executeJavaScript(`(() => {
+            const until = performance.now() + 5000;
+            while (performance.now() < until) {}
+        })()`);
+        console.log('UI_BLOCK_END');
     } else if (command === 'quit') {
         BrowserWindow.fromWebContents(contents).close();
     }

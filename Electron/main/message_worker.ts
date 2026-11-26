@@ -1,14 +1,98 @@
 /* message_worker.js */
 import { parentPort, workerData, type MessagePort } from 'node:worker_threads';
 import * as message from './message';
-import { routeMessage } from './message_router';
+import { routeMessage, type Target } from './message_router';
+import { OutgoingRouter } from '../shared/outgoing_router';
+import { NeighborMonitor } from '../shared/neighbor_monitor';
+import { parseHealthReport } from '../shared/health';
 import type { DecodedHeader, Prefix } from '../shared/types';
 
+const { ProcessKind, Command } = message;
+const SELF = ProcessKind.PROCESS_KIND_ELECTRON_MAIN;
 const parent = parentPort!;
 const networkPort: MessagePort = workerData.port;
 let invalid = false;
+let monitorTimer: NodeJS.Timeout | undefined;
+let nextMonitorId = 2;
+let heartbeat = 0;
+let processedCount = 0;
+let lastProgress = performance.now();
 
-type Source = 'network' | 'renderer';
+// Where a frame came from: the Engine, the renderer, or Electron Main itself.
+type Source = 'network' | 'renderer' | 'local';
+
+const TARGET_KINDS: Record<string, number> = {
+    engine: ProcessKind.PROCESS_KIND_ENGINE,
+    'electron-renderer': ProcessKind.PROCESS_KIND_ELECTRON_RENDERER,
+};
+
+// This thread is the router, so it alone owns the table of which neighbors are ready and the queue of messages
+// waiting for each. Everything else learns about changes through messages.
+const outgoing = new OutgoingRouter<ArrayBuffer>((kind, bytes) => forward(kind === ProcessKind.PROCESS_KIND_ENGINE
+    ? 'engine' : 'electron-renderer', bytes, false));
+
+function control(kind: number, commandId: number, destinationId = 0, payload: Uint8Array = new Uint8Array()): void {
+    const bytes = Uint8Array.from(message.buildFrame({ destinationKind: kind, destinationId,
+        senderKind: SELF, commandId }, { protocolVersion: 1, messageId: (nextMonitorId += 2) - 2,
+        timestamp: Date.now(), senderName: message.processName(SELF), destinationName: message.processName(kind),
+        payloadType: commandId === Command.COMMAND_PONG
+            ? message.PayloadType.PAYLOAD_TYPE_PROTOBUF : message.PayloadType.PAYLOAD_TYPE_NONE,
+        messageType: commandId === Command.COMMAND_PONG
+            ? message.MessageType.MESSAGE_TYPE_HEALTH_REPORT : message.MessageType.MESSAGE_TYPE_NONE,
+    }, payload));
+    routeFrame(bytes.buffer, 'local');
+}
+
+function healthPayload(): Uint8Array {
+    outgoing.sweep();
+    return message.HealthReport.encode(message.HealthReport.fromObject({
+        processedCount, heartbeat, progressAgeMs: Math.floor(performance.now() - lastProgress),
+        queues: outgoing.queueHealth(),
+    })).finish();
+}
+
+const monitor = new NeighborMonitor(
+    (kind, command) => {
+        if (command === 'probe') log('info', `Sending readiness probe to ${message.processName(kind)}.`);
+        control(kind, command === 'probe' ? Command.COMMAND_REQUEST_READY : Command.COMMAND_PING);
+    },
+    (kind) => outgoing.state(kind),
+    (kind, state) => {
+        if (state === 'ready') {
+            if (outgoing.markReady(kind)) parent.postMessage({ type: 'peer-ready', kind });
+        } else {
+            outgoing.setState(kind, state);
+            if (state === 'down' || state === 'unreachable') outgoing.discardQueue(kind);
+            if (state !== 'probing') log('warn', `${message.processName(kind)} is ${state.toUpperCase()}.`);
+        }
+    },
+);
+
+function forward(destination: Target, bytes: ArrayBuffer, broadcast: boolean): void {
+    parent.postMessage({ type: 'forward', destination, frame: bytes, broadcast }, [bytes]);
+}
+
+function log(level: 'info' | 'warn', text: string): void {
+    parent.postMessage({ type: 'log', level, message: text });
+}
+
+// Relayed frames are not inspected beyond their time to live; the process they are for rejects a bad header itself.
+function timeToLive(frame: Buffer): number {
+    try {
+        return message.parseFrame(frame).header.ttlMs;
+    } catch {
+        return 0;
+    }
+}
+
+// A READY from a neighbor marks it ready and delivers whatever was waiting for it.
+function noteReadiness(prefix: Prefix, source: Source): void {
+    const sender = prefix.senderKind;
+    if (source === 'local' || prefix.commandId !== Command.COMMAND_READY ||
+        sender === SELF || sender === ProcessKind.PROCESS_KIND_BROADCAST) return;
+    if (outgoing.state(sender) !== 'degraded' && outgoing.markReady(sender))
+        parent.postMessage({ type: 'peer-ready', kind: sender });
+}
 
 function routeFrame(bytes: ArrayBuffer, source: Source): void {
     let frame: Buffer;
@@ -35,7 +119,13 @@ function routeFrame(bytes: ArrayBuffer, source: Source): void {
         });
         return;
     }
-    let incoming: { prefix: Prefix; header: DecodedHeader } | null = null;
+    // Readiness messages and broadcasts always go out at once, because they are how readiness is learned.
+    // Everything else waits in the queue until its destination is ready.
+    const broadcast = prefix.destinationKind === ProcessKind.PROCESS_KIND_BROADCAST;
+    const queued = !broadcast && prefix.commandId !== Command.COMMAND_READY &&
+        prefix.commandId !== Command.COMMAND_REQUEST_READY && prefix.commandId !== Command.COMMAND_PING &&
+        prefix.commandId !== Command.COMMAND_PONG;
+    let incoming: { prefix: Prefix; header: DecodedHeader; payload: Buffer } | null = null;
     if (targets.includes('electron-main')) {
         try {
             incoming = message.parseFrame(frame);
@@ -48,6 +138,31 @@ function routeFrame(bytes: ArrayBuffer, source: Source): void {
             return;
         }
     }
+    if (queued || (broadcast && prefix.commandId !== Command.COMMAND_READY &&
+        prefix.commandId !== Command.COMMAND_REQUEST_READY && prefix.commandId !== Command.COMMAND_PING &&
+        prefix.commandId !== Command.COMMAND_PONG)) {
+        processedCount++;
+        lastProgress = performance.now();
+    }
+    if (source !== 'local') {
+        if (incoming && prefix.commandId === Command.COMMAND_PONG) {
+            try {
+                if (incoming.header.payloadType !== message.PayloadType.PAYLOAD_TYPE_PROTOBUF ||
+                    incoming.header.messageType !== message.MessageType.MESSAGE_TYPE_HEALTH_REPORT)
+                    throw new Error('Unexpected health report type.');
+                const decoded = message.HealthReport.decode(incoming.payload);
+                monitor.report(prefix.senderKind, parseHealthReport(message.HealthReport.toObject(decoded,
+                    { defaults: true, longs: String })));
+            } catch (error) {
+                parent.postMessage({ type: 'error', message: `Invalid health report: ${(error as Error).message}` });
+            }
+        }
+        if (incoming || prefix.commandId === Command.COMMAND_READY)
+            monitor.observe(prefix.senderKind, prefix.commandId === Command.COMMAND_READY);
+        noteReadiness(prefix, source);
+        if (incoming && prefix.commandId === Command.COMMAND_PING)
+            control(prefix.senderKind, Command.COMMAND_PONG, prefix.senderId, healthPayload());
+    }
     // Every delivery but the last gets its own copy, because posting an ArrayBuffer transfers it away.
     targets.forEach((target, index) => {
         const bytesToSend = index === targets.length - 1 ? bytes : bytes.slice(0);
@@ -58,14 +173,26 @@ function routeFrame(bytes: ArrayBuffer, source: Source): void {
                 header: incoming!.header,
                 frame: bytesToSend,
             }, [bytesToSend]);
+        } else if (queued) {
+            if (!outgoing.send(TARGET_KINDS[target], bytesToSend, incoming ? incoming.header.ttlMs : timeToLive(frame)))
+                log('info', `${message.processName(TARGET_KINDS[target])} is not ready; the message is waiting.`);
         } else {
-            parent.postMessage({ type: 'forward', destination: target, frame: bytesToSend }, [bytesToSend]);
+            forward(target, bytesToSend, broadcast);
         }
     });
 }
 
 networkPort.on('message', (event: { type: string; frame: ArrayBuffer }) => {
+    if (event.type === 'connected') {
+        monitor.start(ProcessKind.PROCESS_KIND_ENGINE);
+        monitor.start(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+        monitorTimer = setInterval(() => { outgoing.sweep(); monitor.tick(); }, 1000);
+        monitorTimer.unref();
+        return;
+    }
     if (event.type === 'end') {
+        clearInterval(monitorTimer);
+        outgoing.markNotReady(ProcessKind.PROCESS_KIND_ENGINE);
         networkPort.close();
         parent.close();
         return;
@@ -73,10 +200,17 @@ networkPort.on('message', (event: { type: string; frame: ArrayBuffer }) => {
     if (event.type === 'frame' && !invalid) routeFrame(event.frame, 'network');
 });
 
-parent.on('message', (event: { type: string; frame: ArrayBuffer }) => {
+parent.on('message', (event: { type: string; frame: ArrayBuffer; source?: Source; kind: number; heartbeat: number }) => {
     if (event.type === 'frame') {
-        routeFrame(event.frame, 'renderer');
+        routeFrame(event.frame, event.source ?? 'renderer');
+    } else if (event.type === 'heartbeat') {
+        heartbeat = event.heartbeat;
+    } else if (event.type === 'not-ready') {
+        outgoing.markNotReady(event.kind);
+        if (event.kind === ProcessKind.PROCESS_KIND_ELECTRON_RENDERER && monitorTimer)
+            monitor.start(event.kind);
     } else if (event.type === 'shutdown') {
+        clearInterval(monitorTimer);
         networkPort.close();
         parent.close();
     }

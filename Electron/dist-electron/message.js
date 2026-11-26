@@ -25,6 +25,7 @@ const PREFIX_SIZE = 23;
 const MAX_FRAME_LENGTH = 16 * 1024 * 1024;
 const root = protobuf__namespace.loadSync(path__namespace.join(__dirname, "..", "..", "Schemas", "fray.proto"));
 const Header = root.lookupType("fray.Header");
+const HealthReport = root.lookupType("fray.HealthReport");
 const ProcessKind = root.lookupEnum("fray.ProcessKind").values;
 const PayloadType = root.lookupEnum("fray.PayloadType").values;
 const MessageType = root.lookupEnum("fray.MessageType").values;
@@ -92,6 +93,7 @@ function parseFrame(frame) {
   return { prefix, header, payload: frame.subarray(headerEnd) };
 }
 exports.Command = Command;
+exports.HealthReport = HealthReport;
 exports.MAX_FRAME_LENGTH = MAX_FRAME_LENGTH;
 exports.MessageType = MessageType;
 exports.PREFIX_SIZE = PREFIX_SIZE;

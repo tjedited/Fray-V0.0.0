@@ -270,16 +270,40 @@ test('Electron workers exchange frames with the Engine and shut down', { timeout
         const received = [];
         client.on('message', (incomingMessage) => received.push(incomingMessage));
         await once(client, 'connected');
+        const readyPeers = [];
+        client.on('peer-ready', (kind) => readyPeers.push(kind));
+        // The router holds this message because the Engine has not said it is ready, and tells nobody.
+        client.send(frame(message.Command.COMMAND_TEST, Buffer.from('worker test'), 78));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.doesNotMatch(output, /message_id=78 /);
         client.send(frame(message.Command.COMMAND_READY, Buffer.alloc(0), 77));
         await waitUntil(() => received.some((m) => m.prefix.commandId === message.Command.COMMAND_TEST), 'the Engine test frame');
         const incoming = received.find((m) => m.prefix.commandId === message.Command.COMMAND_TEST);
         assert.equal(incoming.header.senderName, 'Engine');
         assert.deepEqual(JSON.parse(incoming.payload.toString()), { message: 'Hello from the Engine' });
-        client.send(frame(message.Command.COMMAND_TEST, Buffer.from('worker test'), 78));
+        // The Engine answers a newly ready neighbor with its own READY, so the held message is delivered without a request.
+        await waitUntil(() => /message_id=78 .*payload_bytes=11 /.test(output), 'the queued message to reach the Engine');
+        client.send(frame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), 80));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.deepEqual(readyPeers, [message.ProcessKind.PROCESS_KIND_ENGINE]);
+        await waitUntil(() => received.some((m) => m.prefix.commandId === message.Command.COMMAND_PING),
+            'a periodic Engine PING', 3000);
+        await waitUntil(() => /Health report from Electron Main: heartbeat=[1-9]/.test(output),
+            'the Engine health report log', 3000);
+        await waitUntil(() => received.some((m) => m.prefix.commandId === message.Command.COMMAND_PONG),
+            'the Engine health report', 3000);
+        const engineHealth = received.find((m) => m.prefix.commandId === message.Command.COMMAND_PONG);
+        assert.equal(engineHealth.header.messageType, message.MessageType.MESSAGE_TYPE_HEALTH_REPORT);
+        const health = message.HealthReport.toObject(message.HealthReport.decode(engineHealth.payload),
+            { defaults: true, longs: String });
+        assert.ok(BigInt(health.heartbeat) > 0n);
+        assert.doesNotMatch(output, /Sending PING|Received frame: command=(?:5|6) /);
+        assert.match(output, /Electron Main is ready\./);
+        const closeStarted = Date.now();
         await client.close(frame(message.Command.COMMAND_QUIT, Buffer.alloc(0), 79));
         const [code] = await exited;
+        assert.ok(Date.now() - closeStarted < 2000, 'monitoring timers must not delay shutdown');
         assert.equal(code, 0, output);
-        assert.match(output, /message_id=78 .*payload_bytes=11 /);
         assert.match(output, /message_id=79 .*payload_bytes=0 /);
         assert.deepEqual(threads.runningNames(), []);
     } finally {
@@ -412,12 +436,14 @@ test('Electron main sends a test frame and a framed quit', { timeout: 10000 }, a
         }, { senderName: 'Electron Renderer', messageId: 5 }));
         ipcMain.emit('fray:frame', { sender: win.webContents },
             fromRenderer(message.Command.COMMAND_READY, BROADCAST));
-        await waitUntil(() => win.sent.length === 1, 'the Main to renderer test frame');
-        assert.equal(win.sent[0][0], 'fray:frame');
+        // The renderer gets Main's test frame, plus Main's own READY in answer to the renderer's.
+        await waitUntil(() => win.sent.length === 2, 'the Main to renderer test frame');
+        const toRenderer = win.sent.map(([, bytes]) => message.decodePrefix(Buffer.from(bytes)).commandId).sort();
+        assert.deepEqual(toRenderer, [message.Command.COMMAND_READY, message.Command.COMMAND_TEST].sort());
         // The renderer's broadcast reaches the Engine too, but is not echoed back to the renderer.
         await waitUntil(() => frames.some((f) => f.prefix.senderKind === message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER),
             'the renderer broadcast at the Engine');
-        assert.equal(win.sent.length, 1);
+        assert.equal(win.sent.length, 2);
         assert.equal(frames.some((f) => f.prefix.commandId === message.Command.COMMAND_TEST), false,
             'Main does not test the Engine until the Engine says it is ready.');
         socket.write(message.buildFrame({

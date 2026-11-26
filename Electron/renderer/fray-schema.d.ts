@@ -14,8 +14,19 @@ declare module 'virtual:fray-schema' {
     toObject(message: HeaderMessage, options?: { defaults?: boolean; longs?: StringConstructor }): object;
   }
 
+  interface HealthMessage {
+    readonly __health: unique symbol;
+  }
+  interface HealthStatic {
+    fromObject(object: object): HealthMessage;
+    encode(message: HealthMessage): { finish(): Uint8Array };
+    decode(bytes: Uint8Array): HealthMessage;
+    toObject(message: HealthMessage, options?: { defaults?: boolean; longs?: StringConstructor }): object;
+  }
+
   export namespace fray {
     const Header: HeaderStatic;
+    const HealthReport: HealthStatic;
     const ProcessKind: EnumValues;
     const PayloadType: EnumValues;
     const MessageType: EnumValues;

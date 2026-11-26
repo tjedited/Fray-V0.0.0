@@ -20,7 +20,10 @@ export interface IPCManagerEvents {
     connected: [];
     disconnected: [];
     message: [IncomingMessage<Buffer>];
-    'renderer-frame': [ArrayBuffer];
+    /** A frame to hand to the renderer. `broadcast` frames are sent only if the renderer can take them. */
+    'renderer-frame': [ArrayBuffer, boolean];
+    /** A neighbor became ready, as seen by the router thread. */
+    'peer-ready': [number];
 }
 
 /**
@@ -176,12 +179,18 @@ export class IPCManager extends EventEmitter<IPCManagerEvents> {
     private closePromise: Promise<void> | null = null;
     private readonly router: Worker;
     private readonly network: Worker;
+    private readonly heartbeatTimer: NodeJS.Timeout;
 
     constructor(host: string, port: number, private readonly threads = new ThreadManager()) {
         super();
         const { port1, port2 } = new MessageChannel();
         this.router = threads.spawn('electron-messages', path.join(__dirname, 'message_worker.js'),
             { port: port1 }, [port1]);
+        let heartbeat = 0;
+        const beat = () => this.router.postMessage({ type: 'heartbeat', heartbeat: ++heartbeat });
+        beat();
+        this.heartbeatTimer = setInterval(beat, 1000);
+        this.heartbeatTimer.unref();
         this.network = threads.spawn('network', path.join(__dirname, 'network_worker.js'),
             { host, port, routerPort: port2 }, [port2]);
         this.network.on('message', (event: { type: string; message?: string }) => {
@@ -195,7 +204,7 @@ export class IPCManager extends EventEmitter<IPCManagerEvents> {
                 log.electronError('Network thread: %s', event.message);
             }
         });
-        this.router.on('message', (event: { type: string; prefix: Prefix; header: DecodedHeader; frame: ArrayBuffer; destination?: string; message?: string }) => {
+        this.router.on('message', (event: { type: string; prefix: Prefix; header: DecodedHeader; frame: ArrayBuffer; destination?: string; broadcast?: boolean; kind?: number; level?: string; message?: string }) => {
             if (event.type === 'message') {
                 const frame = Buffer.from(event.frame);
                 this.emit('message', {
@@ -205,11 +214,16 @@ export class IPCManager extends EventEmitter<IPCManagerEvents> {
                 });
             } else if (event.type === 'forward') {
                 if (event.destination === 'engine') {
-                    if (this.connected && !this.closing) this.send(Buffer.from(event.frame));
+                    if (this.connected && !this.closing) this.network.postMessage({ type: 'send', frame: Buffer.from(event.frame) });
                     else log.electronError('Cannot forward frame: TCP client is not connected.');
                 } else {
-                    this.emit('renderer-frame', event.frame);
+                    this.emit('renderer-frame', event.frame, event.broadcast === true);
                 }
+            } else if (event.type === 'peer-ready') {
+                this.emit('peer-ready', event.kind!);
+            } else if (event.type === 'log') {
+                if (event.level === 'warn') log.electronWarn('Message thread: %s', event.message);
+                else log.electronInfo('Message thread: %s', event.message);
             } else if (event.type === 'error') {
                 log.electronError('Message thread: %s', event.message);
             }
@@ -225,9 +239,19 @@ export class IPCManager extends EventEmitter<IPCManagerEvents> {
         }
     }
 
+    /**
+     * Hands a frame to the router thread and returns at once. The router sends it now if its destination is ready,
+     * and otherwise holds it until the destination is ready or the header's ttlMs runs out. Nothing comes back.
+     */
     send(frame: Buffer): void {
-        if (!this.connected || this.closing) throw new Error('Cannot send: TCP client is not connected.');
-        this.network.postMessage({ type: 'send', frame });
+        if (this.closing) throw new Error('Cannot send: IPC is closing.');
+        const bytes = Uint8Array.from(frame);
+        this.router.postMessage({ type: 'frame', source: 'local', frame: bytes.buffer }, [bytes.buffer]);
+    }
+
+    /** Tells the router that a neighbor can no longer be reached, so messages for it wait in the queue again. */
+    markNotReady(kind: number): void {
+        if (!this.closing) this.router.postMessage({ type: 'not-ready', kind });
     }
 
     routeRendererFrame(frame: Uint8Array): void {
@@ -239,6 +263,7 @@ export class IPCManager extends EventEmitter<IPCManagerEvents> {
     close(finalFrame: Buffer | null = null): Promise<void> {
         if (this.closePromise) return this.closePromise;
         this.closing = true;
+        clearInterval(this.heartbeatTimer);
         this.closePromise = this.stop(finalFrame);
         return this.closePromise;
     }

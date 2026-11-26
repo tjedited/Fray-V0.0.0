@@ -14,6 +14,7 @@ export const MAX_FRAME_LENGTH = 16 * 1024 * 1024;
 // Both main/ and its build output sit one level below Electron/, so the schema is found the same way.
 const root = protobuf.loadSync(path.join(__dirname, '..', '..', 'Schemas', 'fray.proto'));
 const Header = root.lookupType('fray.Header');
+export const HealthReport = root.lookupType('fray.HealthReport');
 
 // Enum name -> number objects, generated from the same schema as the engine.
 export const ProcessKind = root.lookupEnum('fray.ProcessKind').values;

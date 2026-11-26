@@ -36,11 +36,12 @@ namespace fray
         {
             const auto& prefix = incomingMessage.prefix;
             const auto& header = incomingMessage.header;
-            log::engineInfo("Received frame: command=%u sender=%s destination=%s protocol=%u message_id=%llu timestamp=%llu flags=%u payload_type=%d message_type=%d payload_bytes=%zu frame_bytes=%zu.",
-                prefix.commandId, header.sender_name().c_str(), header.destination_name().c_str(), header.protocol_version(),
-                static_cast<unsigned long long>(header.message_id()), static_cast<unsigned long long>(header.timestamp()),
-                header.flags(), static_cast<int>(header.payload_type()), static_cast<int>(header.message_type()),
-                incomingMessage.payloadSize(), incomingMessage.frame->size());
+            if (prefix.commandId != COMMAND_PING && prefix.commandId != COMMAND_PONG)
+                log::engineInfo("Received frame: command=%u sender=%s destination=%s protocol=%u message_id=%llu timestamp=%llu flags=%u payload_type=%d message_type=%d payload_bytes=%zu frame_bytes=%zu.",
+                    prefix.commandId, header.sender_name().c_str(), header.destination_name().c_str(), header.protocol_version(),
+                    static_cast<unsigned long long>(header.message_id()), static_cast<unsigned long long>(header.timestamp()),
+                    header.flags(), static_cast<int>(header.payload_type()), static_cast<int>(header.message_type()),
+                    incomingMessage.payloadSize(), incomingMessage.frame->size());
             if (prefix.destinationKind == PROCESS_KIND_ENGINE &&
                 prefix.senderKind == PROCESS_KIND_ELECTRON_MAIN && prefix.commandId == COMMAND_QUIT)
             {
