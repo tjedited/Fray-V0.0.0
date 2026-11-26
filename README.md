@@ -140,7 +140,8 @@ preload cannot load other files). `package.json` points `main` at
 built into `Electron/dist/` by `npm run build:renderer`; `npm run build` does
 both. `npm run start` builds Main first, so rerun it after editing Main code.
 `npm run typecheck` checks Main and the renderer with `tsc` (both use strict
-mode; Vite itself only strips types and does not check them).
+mode; Vite itself only strips types and does not check them). The editor
+discovers Main's settings through `Electron/main/tsconfig.json`.
 
 The IPC tests load the compiled Main code, so run `npm run build:main` in
 `Electron/` before them.
