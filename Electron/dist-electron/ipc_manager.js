@@ -38,16 +38,6 @@ class TCPClient {
     this.port = port;
     this.timeoutMs = timeoutMs;
     this.retryDelayMs = retryDelayMs;
-    this.client = new net__namespace.Socket();
-    this.connected = false;
-    this.startTime = Date.now();
-    this.prefixBuffer = Buffer.alloc(message.PREFIX_SIZE);
-    this.prefixBytes = 0;
-    this.frame = null;
-    this.frameBytes = 0;
-    this.stopping = false;
-    this.finished = false;
-    this.retryTimer = null;
     this.onFrame = handlers.onFrame;
     this.onConnect = handlers.onConnect;
     this.onClose = handlers.onClose;
@@ -116,6 +106,20 @@ class TCPClient {
     });
     this.tryConnect();
   }
+  client = new net__namespace.Socket();
+  connected = false;
+  startTime = Date.now();
+  prefixBuffer = Buffer.alloc(message.PREFIX_SIZE);
+  prefixBytes = 0;
+  frame = null;
+  frameBytes = 0;
+  onFrame;
+  onConnect;
+  onClose;
+  onError;
+  stopping = false;
+  finished = false;
+  retryTimer = null;
   /**
    * Attempt to connect to the configured host/port.
    * On success, marks the client as connected.
@@ -154,9 +158,6 @@ class IPCManager extends node_events.EventEmitter {
   constructor(host, port, threads = new thread_manager.ThreadManager()) {
     super();
     this.threads = threads;
-    this.connected = false;
-    this.closing = false;
-    this.closePromise = null;
     const { port1, port2 } = new node_worker_threads.MessageChannel();
     this.router = threads.spawn(
       "electron-messages",
@@ -220,6 +221,12 @@ class IPCManager extends node_events.EventEmitter {
       });
     }
   }
+  connected = false;
+  closing = false;
+  closePromise = null;
+  router;
+  network;
+  heartbeatTimer;
   /**
    * Hands a frame to the router thread and returns at once. The router sends it now if its destination is ready,
    * and otherwise holds it until the destination is ready or the header's ttlMs runs out. Nothing comes back.

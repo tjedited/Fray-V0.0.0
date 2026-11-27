@@ -30,6 +30,8 @@ enum PayloadType {
 enum MessageType {
   MESSAGE_TYPE_NONE = 0;
   MESSAGE_TYPE_HEALTH_REPORT = 1;
+  MESSAGE_TYPE_PROJECT_OPEN_REQUEST = 2;
+  MESSAGE_TYPE_PROJECT_OPEN_RESULT = 3;
 }
 
 // Initial core commands used by the Engine and Electron main process.
@@ -43,6 +45,19 @@ enum Command {
   COMMAND_REQUEST_READY = 4;
   COMMAND_PING = 5;
   COMMAND_PONG = 6;
+  COMMAND_OPEN_PROJECT = 7;
+  COMMAND_PROJECT_OPEN_RESULT = 8;
+}
+
+message ProjectOpenRequest {
+  string name = 1;
+}
+
+message ProjectOpenResult {
+  string name = 1;
+  bool success = 2;
+  string error = 3;
+  uint64 request_id = 4;
 }
 
 message Header {

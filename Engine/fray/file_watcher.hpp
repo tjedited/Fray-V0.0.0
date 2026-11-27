@@ -37,16 +37,21 @@ namespace fray
             std::uint64_t index = 0;
 
             bool valid() const { return device != 0 || index != 0; }
-            bool operator==(const FileId& other) const { return device == other.device && index == other.index; }
-            bool operator!=(const FileId& other) const { return !(*this == other); }
-            bool operator<(const FileId& other) const
+            bool operator==(
+                const FileId& other) const { return device == other.device && index == other.index; }
+            bool operator!=(
+                const FileId& other) const { return !(*this == other); }
+            bool operator<(
+                const FileId& other) const
             {
                 return device != other.device ? device < other.device : index < other.index;
             }
         };
 
         // Reads the identity of the entry itself; symbolic links are not followed.
-        inline bool fileId(const std::filesystem::path& path, FileId& id)
+        inline bool fileId(
+            const std::filesystem::path& path,
+            FileId& id)
         {
 #ifdef _WIN32
             HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -123,7 +128,8 @@ namespace fray
                 Subscription _nextSubscription = 1;
                 std::function<void()> _notify;
 
-                static Snapshot scanFolder(const std::filesystem::path& root)
+                static Snapshot scanFolder(
+                    const std::filesystem::path& root)
                 {
                     Snapshot snapshot;
                     std::error_code error;
@@ -149,13 +155,16 @@ namespace fray
                     return snapshot;
                 }
 
-                static bool inside(const std::string& path, const std::string& folder)
+                static bool inside(
+                    const std::string& path,
+                    const std::string& folder)
                 {
                     return path.size() > folder.size() && path.compare(0, folder.size(), folder) == 0 &&
                            path[folder.size()] == '/';
                 }
 
-                void enqueue(std::vector<Change>& changes)
+                void enqueue(
+                    std::vector<Change>& changes)
                 {
                     if (changes.empty())
                         return;
@@ -164,7 +173,10 @@ namespace fray
                         _queue.push_back(std::move(change));
                 }
 
-                void diff(const Snapshot& before, const Snapshot& after, std::vector<Change>& changes) const
+                void diff(
+                    const Snapshot& before,
+                    const Snapshot& after,
+                    std::vector<Change>& changes) const
                 {
                     std::map<FileId, std::string> added;
                     for (const auto& entry : after)
@@ -248,12 +260,15 @@ namespace fray
 
             public:
                 FileWatcher() = default;
-                FileWatcher(const FileWatcher&) = delete;
-                FileWatcher& operator=(const FileWatcher&) = delete;
+                FileWatcher(
+                    const FileWatcher&) = delete;
+                FileWatcher& operator=(
+                    const FileWatcher&) = delete;
 
                 // Starts (or restarts) watching `root`, taking a silent baseline. Also used to
                 // acknowledge a change the owner made itself.
-                bool watch(const std::filesystem::path& root)
+                bool watch(
+                    const std::filesystem::path& root)
                 {
                     std::lock_guard<std::recursive_mutex> lock(_scan);
                     FileId id;
@@ -276,7 +291,9 @@ namespace fray
                 // Blocks polling while held, so the owner can change files without being reported.
                 std::unique_lock<std::recursive_mutex> hold() { return std::unique_lock<std::recursive_mutex>(_scan); }
 
-                Subscription subscribe(Filter filter, Handler handler)
+                Subscription subscribe(
+                    Filter filter,
+                    Handler handler)
                 {
                     std::lock_guard<std::mutex> lock(_queueMutex);
                     const Subscription id = _nextSubscription++;
@@ -284,7 +301,8 @@ namespace fray
                     return id;
                 }
 
-                void unsubscribe(Subscription id)
+                void unsubscribe(
+                    Subscription id)
                 {
                     std::lock_guard<std::mutex> lock(_queueMutex);
                     for (auto it = _subscribers.begin(); it != _subscribers.end(); ++it)
@@ -296,7 +314,8 @@ namespace fray
                 }
 
                 // Called from the polling thread whenever poll() queued something.
-                void setNotify(std::function<void()> notify)
+                void setNotify(
+                    std::function<void()> notify)
                 {
                     std::lock_guard<std::mutex> lock(_queueMutex);
                     _notify = std::move(notify);
@@ -372,8 +391,10 @@ namespace fray
 
                 // Polls until stopped; intended as the body of a ThreadManager thread.
                 // `tick`, if given, runs once per interval after polling.
-                void run(const threads::StopToken& token, std::function<void()> tick = nullptr,
-                         std::chrono::milliseconds interval = std::chrono::milliseconds(1000))
+                void run(
+                    const threads::StopToken& token,
+                    std::function<void()> tick = nullptr,
+                    std::chrono::milliseconds interval = std::chrono::milliseconds(1000))
                 {
                     while (!token.waitFor(interval))
                     {

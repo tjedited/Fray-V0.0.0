@@ -60,7 +60,8 @@ namespace fray
 #undef X
         };
 
-        inline const F_char *description(code err)
+        inline const F_char *description(
+            code err)
         {
             static F_char buffer[128];
             switch (err)
@@ -77,7 +78,8 @@ namespace fray
             }
         }
 
-        inline const F_char *description(F_err err)
+        inline const F_char *description(
+            F_err err)
         {
             return description(static_cast<code>(err));
         }

@@ -17,6 +17,9 @@
 
 namespace fray
 {
+    namespace ipc { class IPCManager; }
+    namespace message { struct InData; }
+
     // Owns the projects. Each project runs on its own thread, so several can load at once and a
     // slow one does not hold up the others. FrayManager's own methods are meant to be driven from
     // one controlling thread.
@@ -36,10 +39,12 @@ namespace fray
             threads::ThreadManager* _threads;
             threads::ThreadManager::Id _applicationThread = 0;
             std::shared_ptr<threads::TaskQueue> _applicationQueue = std::make_shared<threads::TaskQueue>();
+            bool _shutdown = false;
             std::mutex _mutex;
             std::unordered_map<std::string, Entry> _projects;
 
-            static std::future<F_err> ready(F_err result)
+            static std::future<F_err> ready(
+                F_err result)
             {
                 std::promise<F_err> promise;
                 promise.set_value(result);
@@ -48,7 +53,10 @@ namespace fray
 
             // Runs on the project's thread and waits; a queue that already shut down counts as failure.
             template<typename Function>
-            static F_err callOnThread(Entry& entry, Function function, F_err failure)
+            static F_err callOnThread(
+                Entry& entry,
+                Function function,
+                F_err failure)
             {
                 try
                 {
@@ -61,20 +69,24 @@ namespace fray
                 }
             }
 
-            Entry* find(const std::string& name)
+            Entry* find(
+                const std::string& name)
             {
                 std::lock_guard<std::mutex> lock(_mutex);
                 const auto found = _projects.find(name);
                 return found == _projects.end() ? nullptr : &found->second;
             }
 
-            void retire(Entry& entry)
+            void retire(
+                Entry& entry)
             {
                 entry.queue->shutdown();
                 _threads->join(entry.thread);
             }
 
-            void rekey(const std::string& oldName, const std::string& newName)
+            void rekey(
+                const std::string& oldName,
+                const std::string& newName)
             {
                 std::lock_guard<std::mutex> lock(_mutex);
                 auto node = _projects.extract(oldName);
@@ -103,7 +115,8 @@ namespace fray
 
         public:
             // Uses its own ThreadManager, which is convenient for tests.
-            explicit FrayManager(const std::string& applicationId = "Fray")
+            explicit FrayManager(
+                const std::string& applicationId = "Fray")
                 : _applicationId(applicationId),
                   _ownedThreads(std::make_unique<threads::ThreadManager>()),
                   _threads(_ownedThreads.get())
@@ -112,42 +125,87 @@ namespace fray
             }
 
             // Registers its threads with a ThreadManager owned by someone else, which must outlive this object.
-            explicit FrayManager(threads::ThreadManager& threads, const std::string& applicationId = "Fray")
+            explicit FrayManager(
+                threads::ThreadManager& threads,
+                const std::string& applicationId = "Fray")
                 : _applicationId(applicationId), _threads(&threads)
             {
                 init();
             }
-            FrayManager(const FrayManager&) = delete;
-            FrayManager& operator=(const FrayManager&) = delete;
+            FrayManager(
+                const FrayManager&) = delete;
+            FrayManager& operator=(
+                const FrayManager&) = delete;
 
             ~FrayManager()
             {
+                shutdown();
+                _active = false;
+            }
+
+            // Stop accepting application tasks and finish project work before IPC is destroyed.
+            void shutdown()
+            {
+                if (_shutdown)
+                    return;
+                _applicationQueue->shutdown();
+                _threads->join(_applicationThread);
+                _shutdown = true;
+                std::vector<std::future<void>> openings;
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    for (auto& entry : _projects)
+                        if (entry.second.project->isOpening())
+                            openings.push_back(entry.second.queue->call([] {}));
+                }
+                for (auto& opening : openings)
+                {
+                    try { opening.get(); }
+                    catch (const std::future_error&)
+                    {
+                        log::engineWarn("Project queue stopped before its shutdown barrier; the open may have failed.");
+                    }
+                }
                 if (close() != errors::NONE)
                     log::engineError("Some projects could not be closed; check their archives and working folders.");
                 for (auto& entry : _projects)
                     entry.second.queue->shutdown();
-                _applicationQueue->shutdown();
                 // Only this manager's own threads; the shared ThreadManager may hold others.
                 for (auto& entry : _projects)
                     _threads->join(entry.second.thread);
-                _threads->join(_applicationThread);
                 _projects.clear();
-                _active = false;
             }
 
             const std::string& applicationId() const { return _applicationId; }
 
             // Queues work for the application thread. Returns false once the manager is shutting down.
-            bool postApplication(std::function<void()> task) { return _applicationQueue->post(std::move(task)); }
+            bool postApplication(
+                std::function<void()> task) { return _applicationQueue->post(std::move(task)); }
 
-            // Starts opening a project on a new thread of its own. The result is ready once the project
-            // is open or needs a decision (PROJECT_CONFLICT, DATABASE_CONFLICT).
-            std::future<F_err> openProject(const std::string& path,
-                                                files::ConflictChoice choice = files::ConflictChoice::Ask)
+            // Called by the engine message thread; project work is dispatched asynchronously.
+            void handleApplicationMessage(
+                const message::InData& incoming,
+                ipc::IPCManager& ipc);
+
+            // Starts opening a project on its own thread. The optional completion runs on that thread,
+            // or on the caller for an immediate failure. Conflict cancellation is opt-in for callers
+            // that cannot resolve a pending database choice.
+            std::future<F_err> openProject(
+                const std::string& path,
+                files::ConflictChoice choice = files::ConflictChoice::Ask,
+                std::function<void(F_err)> completion = {},
+                bool cancelOnDatabaseConflict = false)
             {
+                if (_shutdown)
+                {
+                    log::engineError("Cannot open project: FrayManager is shut down.");
+                    if (completion) completion(errors::FAILED_OPEN_PROJECT);
+                    return ready(errors::FAILED_OPEN_PROJECT);
+                }
                 if (path.empty())
                 {
                     log::engineError("Cannot open project: path is empty.");
+                    if (completion) completion(errors::FAILED_OPEN_PROJECT);
                     return ready(errors::FAILED_OPEN_PROJECT);
                 }
                 std::error_code error;
@@ -155,6 +213,7 @@ namespace fray
                 if (error)
                 {
                     log::engineError("Cannot resolve project path: %s", error.message().c_str());
+                    if (completion) completion(errors::FAILED_OPEN_PROJECT);
                     return ready(errors::FAILED_OPEN_PROJECT);
                 }
                 if (resolved.filename().empty() && resolved != resolved.root_path())
@@ -162,19 +221,26 @@ namespace fray
                 const std::string name = resolved.extension() == ".fry"
                     ? resolved.stem().string() : resolved.filename().string();
                 Entry stale;
+                bool alreadyOpen = false;
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
                     const auto found = _projects.find(name);
                     if (found != _projects.end())
                     {
                         if (found->second.project->isOpen() || found->second.project->isOpening())
+                            alreadyOpen = true;
+                        else
                         {
-                            log::engineError("Project is already open: %s", name.c_str());
-                            return ready(errors::PROJECT_ALREADY_OPEN);
+                            stale = std::move(found->second);
+                            _projects.erase(found);
                         }
-                        stale = std::move(found->second);
-                        _projects.erase(found);
                     }
+                }
+                if (alreadyOpen)
+                {
+                    log::engineError("Project is already open: %s", name.c_str());
+                    if (completion) completion(errors::PROJECT_ALREADY_OPEN);
+                    return ready(errors::PROJECT_ALREADY_OPEN);
                 }
                 if (stale.queue)
                     retire(stale);
@@ -194,23 +260,35 @@ namespace fray
                     std::lock_guard<std::mutex> lock(_mutex);
                     _projects.emplace(name, std::move(entry));
                 }
-                return queue->call([this, project, queue, path, choice]
+                return queue->call([this, project, queue, path, choice, completion = std::move(completion),
+                                    cancelOnDatabaseConflict]
                 {
                     const F_err result = project->open(path, _applicationId, choice, _threads, queue);
+                    if (result == errors::DATABASE_CONFLICT && cancelOnDatabaseConflict)
+                    {
+                        if (project->cancelOpen() != errors::NONE)
+                            log::engineError("Could not cancel the pending database choice.");
+                        else
+                            queue->shutdown();
+                    }
                     if (result != errors::NONE && result != errors::DATABASE_CONFLICT)
                         queue->shutdown();
+                    if (completion) completion(result);
                     return result;
                 });
             }
 
             // After DATABASE_CONFLICT: the files that could be the project's database.
-            std::vector<std::string> databaseCandidates(const std::string& name)
+            std::vector<std::string> databaseCandidates(
+                const std::string& name)
             {
                 Entry* entry = find(name);
                 return entry ? entry->project->databaseCandidates() : std::vector<std::string>();
             }
 
-            F_err resolveDatabase(const std::string& name, const DatabaseChoice& choice)
+            F_err resolveDatabase(
+                const std::string& name,
+                const DatabaseChoice& choice)
             {
                 Entry* entry = find(name);
                 if (entry == nullptr)
@@ -226,7 +304,8 @@ namespace fray
                 return result;
             }
 
-            F_err cancelProject(const std::string& name)
+            F_err cancelProject(
+                const std::string& name)
             {
                 Entry* entry = find(name);
                 if (entry == nullptr)
@@ -250,7 +329,8 @@ namespace fray
                 return errors::NONE;
             }
 
-            ProjectManager& project(const std::string& name)
+            ProjectManager& project(
+                const std::string& name)
             {
                 std::lock_guard<std::mutex> lock(_mutex);
                 const auto found = _projects.find(name);
@@ -259,7 +339,8 @@ namespace fray
                 return *found->second.project;
             }
 
-            F_err closeProject(const std::string& name)
+            F_err closeProject(
+                const std::string& name)
             {
                 Entry* entry = find(name);
                 if (entry == nullptr)

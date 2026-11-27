@@ -44,7 +44,8 @@ namespace fray
 
                 // Sleeps for up to `duration`; returns true as soon as a stop is requested.
                 template<typename Rep, typename Period>
-                bool waitFor(const std::chrono::duration<Rep, Period>& duration) const
+                bool waitFor(
+                    const std::chrono::duration<Rep, Period>& duration) const
                 {
                     std::unique_lock<std::mutex> lock(_state->mutex);
                     return _state->wake.wait_for(lock, duration, [this] { return _state->stop; });
@@ -71,7 +72,8 @@ namespace fray
 
             public:
                 // Returns false (and drops the task) once the queue has been shut down.
-                bool post(std::function<void()> task)
+                bool post(
+                    std::function<void()> task)
                 {
                     {
                         std::lock_guard<std::mutex> lock(_mutex);
@@ -85,7 +87,8 @@ namespace fray
 
                 // If the queue is shut down the returned future reports a broken promise.
                 template<typename Function>
-                auto call(Function function) -> std::future<decltype(function())>
+                auto call(
+                    Function function) -> std::future<decltype(function())>
                 {
                     using Result = decltype(function());
                     auto task = std::make_shared<std::packaged_task<Result()>>(std::move(function));
@@ -104,7 +107,8 @@ namespace fray
                 }
 
                 // Runs queued tasks until shutdown() was called, the queue is empty and keepAlive() is false.
-                void run(const std::function<bool()>& keepAlive = nullptr)
+                void run(
+                    const std::function<bool()>& keepAlive = nullptr)
                 {
                     for (;;)
                     {
@@ -158,8 +162,10 @@ namespace fray
 
             public:
                 ThreadManager() = default;
-                ThreadManager(const ThreadManager&) = delete;
-                ThreadManager& operator=(const ThreadManager&) = delete;
+                ThreadManager(
+                    const ThreadManager&) = delete;
+                ThreadManager& operator=(
+                    const ThreadManager&) = delete;
 
                 ~ThreadManager()
                 {
@@ -175,7 +181,9 @@ namespace fray
                     joinAll();
                 }
 
-                Id spawn(const std::string& name, std::function<void(StopToken)> body)
+                Id spawn(
+                    const std::string& name,
+                    std::function<void(StopToken)> body)
                 {
                     StopToken token;
                     auto finished = std::make_shared<std::atomic<bool>>(false);
@@ -201,7 +209,8 @@ namespace fray
                     return id;
                 }
 
-                bool running(Id id) const
+                bool running(
+                    Id id) const
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
                     const auto found = _entries.find(id);
@@ -229,7 +238,8 @@ namespace fray
                     return names;
                 }
 
-                void requestStop(Id id)
+                void requestStop(
+                    Id id)
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
                     const auto found = _entries.find(id);
@@ -238,7 +248,8 @@ namespace fray
                 }
 
                 // Blocks until the thread ends, then forgets it. Joining the calling thread is refused.
-                bool join(Id id)
+                bool join(
+                    Id id)
                 {
                     std::thread thread;
                     {

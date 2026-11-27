@@ -4,6 +4,7 @@ import { Command, HealthReport, MessageType, PayloadType, ProcessKind } from './
 import { OutgoingRouter } from '../shared/outgoing_router';
 import { NeighborMonitor } from '../shared/neighbor_monitor';
 import { parseHealthReport } from '../shared/health';
+import { createFrameBuilder } from '../shared/frame_builder';
 import type { Prefix } from '../shared/types';
 
 // Workers have no DOM window, so the DOM typing of `self` is narrowed to what this worker uses.
@@ -14,7 +15,7 @@ const worker = self as unknown as {
 };
 
 const SELF = ProcessKind.PROCESS_KIND_ELECTRON_RENDERER;
-let nextMonitorId = 2;
+const frames = createFrameBuilder(SELF, 2, buildFrame, processName);
 let heartbeat = 0;
 let processedCount = 0;
 let lastProgress = performance.now();
@@ -26,12 +27,10 @@ const outgoing = new OutgoingRouter<ArrayBuffer>((_kind, frame) => {
 });
 
 function control(kind: number, commandId: number, destinationId = 0, payload: Uint8Array = new Uint8Array()): void {
-  const frame = buildFrame({ destinationKind: kind, destinationId, senderKind: SELF, commandId },
-    { protocolVersion: 1, messageId: (nextMonitorId += 2) - 2, timestamp: Date.now(),
-      senderName: processName(SELF), destinationName: processName(kind),
+  const frame = frames.build({ destination: kind, destinationId, command: commandId, payload,
       payloadType: commandId === Command.COMMAND_PONG ? PayloadType.PAYLOAD_TYPE_PROTOBUF : PayloadType.PAYLOAD_TYPE_NONE,
       messageType: commandId === Command.COMMAND_PONG
-        ? MessageType.MESSAGE_TYPE_HEALTH_REPORT : MessageType.MESSAGE_TYPE_NONE }, payload);
+        ? MessageType.MESSAGE_TYPE_HEALTH_REPORT : MessageType.MESSAGE_TYPE_NONE });
   worker.postMessage({ type: 'outgoing', frame: frame.buffer }, [frame.buffer]);
 }
 

@@ -5,6 +5,8 @@ const log_manager = require("./log_manager.js");
 const ipc_manager = require("./ipc_manager.js");
 const thread_manager = require("./thread_manager.js");
 const message = require("./message.js");
+const message_handler = require("./message_handler.js");
+const frame_builder = require("./shared/frame_builder.js");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -30,7 +32,7 @@ const threads = new thread_manager.ThreadManager();
 let ipc = null;
 let shuttingDown = false;
 let shutdownComplete = false;
-let nextMessageId = 1;
+const frames = frame_builder.createFrameBuilder(SELF, 1, message.buildFrame, message.processName);
 let window = null;
 let rendererState = "starting";
 let rendererThreads = [];
@@ -39,21 +41,6 @@ let resolveRendererStopped;
 const rendererStopped = new Promise((resolve) => {
   resolveRendererStopped = resolve;
 });
-function makeFrame(commandId, payload = Buffer.alloc(0), destinationKind = ProcessKind.PROCESS_KIND_ENGINE, destinationId = 0) {
-  return message.buildFrame({
-    destinationKind,
-    destinationId,
-    senderKind: SELF,
-    commandId
-  }, {
-    protocolVersion: 1,
-    messageId: (nextMessageId += 2) - 2,
-    timestamp: Date.now(),
-    senderName: message.processName(SELF),
-    destinationName: message.processName(destinationKind),
-    payloadType: payload.length ? message.PayloadType.PAYLOAD_TYPE_JSON : message.PayloadType.PAYLOAD_TYPE_NONE
-  }, payload);
-}
 function send(frame) {
   if (!ipc || shuttingDown) {
     log_manager.electronWarn("Cannot send: IPC is not available.");
@@ -65,14 +52,7 @@ function send(frame) {
     log_manager.electronWarn("Cannot send: %s", error.message);
   }
 }
-function announceReady() {
-  send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
-  send(makeFrame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
-}
-function sendTestFrame(kind) {
-  const payload = kind === ProcessKind.PROCESS_KIND_ENGINE ? Buffer.from(JSON.stringify({ message: "Hello from Electron Main" })) : Buffer.alloc(0);
-  send(makeFrame(message.Command.COMMAND_TEST, payload, kind));
-}
+const messages = message_handler.createMessageHandler(frames, send, () => ipc?.connected === true);
 function connectToEngine() {
   if (!enginePort) {
     log_manager.electronError("FRAY_ENGINE_PORT is not set; start Electron through the engine.");
@@ -82,34 +62,10 @@ function connectToEngine() {
   ipc = new ipc_manager.IPCManager("127.0.0.1", enginePort, threads);
   ipc.on("connected", () => {
     if (shuttingDown) return;
-    announceReady();
-    sendTestFrame(ProcessKind.PROCESS_KIND_ENGINE);
-    sendTestFrame(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+    messages.announceReady();
   });
-  ipc.on("peer-ready", (kind) => {
-    log_manager.electronInfo("%s is ready.", message.processName(kind));
-    if (ipc && ipc.connected) send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), kind));
-  });
-  ipc.on("message", ({ prefix, header, payload }) => {
-    if (prefix.commandId !== message.Command.COMMAND_PING && prefix.commandId !== message.Command.COMMAND_PONG)
-      log_manager.electronInfo(
-        "Received frame: command=%d sender=%s destination=%s protocol=%d message_id=%s timestamp=%s flags=%d payload_type=%d message_type=%d payload_bytes=%d frame_bytes=%d.",
-        prefix.commandId,
-        header.senderName,
-        header.destinationName,
-        header.protocolVersion,
-        header.messageId,
-        header.timestamp,
-        header.flags,
-        header.payloadType,
-        header.messageType,
-        payload.length,
-        message.PREFIX_SIZE + prefix.length
-      );
-    const sender = prefix.senderKind;
-    if (prefix.commandId === message.Command.COMMAND_REQUEST_READY && sender !== SELF && sender !== ProcessKind.PROCESS_KIND_BROADCAST && ipc && ipc.connected)
-      send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), sender, prefix.senderId));
-  });
+  ipc.on("peer-ready", messages.onPeerReady);
+  ipc.on("message", messages.onMessage);
   ipc.on("renderer-frame", (frame, broadcast) => sendToRenderer(frame, broadcast));
 }
 function sendToRenderer(frame, broadcast = false) {
@@ -176,11 +132,23 @@ const createWindow = () => {
   const win = new electron.BrowserWindow({
     width: 800,
     height: 600,
+    frame: false,
+    backgroundColor: "#000000",
+    show: false,
     webPreferences: {
-      preload: path__namespace.join(__dirname, "preload.js")
+      preload: path__namespace.join(__dirname, "preload.js"),
+      backgroundThrottling: false
     }
   });
+  if (process.platform === "darwin") win.setWindowButtonVisibility(true);
   window = win;
+  let shown = false;
+  const showWindow = () => {
+    if (shown || shuttingDown) return;
+    shown = true;
+    win.show();
+  };
+  win.once("ready-to-show", showWindow);
   win.webContents.on("console-message", (event) => {
     if (event.level === "error") log_manager.electronError("Renderer: %s", event.message);
     else if (event.level === "warning") log_manager.electronWarn("Renderer: %s", event.message);
@@ -217,6 +185,7 @@ const createWindow = () => {
   win.webContents.on("did-fail-load", (_event, code, description, _url, isMainFrame) => {
     if (!isMainFrame) return;
     log_manager.electronError("Renderer failed to load (%d): %s.", code, description);
+    showWindow();
     if (rendererState === "starting" && rendererThreads.length === 0) {
       rendererState = "gone";
       resolveRendererStopped();
@@ -241,7 +210,7 @@ electron.app.on("before-quit", (event) => {
     let finalFrame = null;
     if (ipc.connected) {
       log_manager.electronInfo("Telling the engine to quit.");
-      finalFrame = makeFrame(message.Command.COMMAND_QUIT);
+      finalFrame = frames.build({ command: message.Command.COMMAND_QUIT, destination: ProcessKind.PROCESS_KIND_ENGINE });
     }
     return ipc.close(finalFrame);
   }).catch((err) => {
@@ -252,6 +221,29 @@ electron.app.on("before-quit", (event) => {
   });
 });
 electron.app.whenReady().then(() => {
+  const menu = [
+    {
+      label: "File",
+      submenu: [
+        { label: "New Project", enabled: false },
+        { label: "Open Project", enabled: false },
+        { label: "Project Preferences", enabled: false },
+        { label: "Close Project", enabled: false },
+        { label: "Package Project", enabled: false }
+      ]
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" }
+      ]
+    }
+  ];
+  if (process.platform === "darwin") {
+    menu.unshift({ label: electron.app.name, submenu: [{ role: "quit" }] });
+  }
+  electron.Menu.setApplicationMenu(electron.Menu.buildFromTemplate(menu));
   log_manager.electronInfo("Showing the window.");
   createWindow();
 });

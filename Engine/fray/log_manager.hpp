@@ -84,7 +84,9 @@ namespace fray
          * @brief Write "[HH:MM:SS:mmm] [YY.MM.DD]" into buffer.
          * @param timestamp Output buffer (>=32 bytes).
          */
-        inline F_void generateTimestamp(F_char *timestamp, std::chrono::system_clock::time_point now = std::chrono::system_clock::now())
+        inline F_void generateTimestamp(
+            F_char *timestamp,
+            std::chrono::system_clock::time_point now = std::chrono::system_clock::now())
         {
             using namespace std::chrono;
             auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
@@ -108,7 +110,8 @@ namespace fray
          * @brief Write "YY.MM.DD" into buffer.
          * @param date Output buffer (>=32 bytes).
          */
-        inline F_void getDate(F_char *date)
+        inline F_void getDate(
+            F_char *date)
         {
             using namespace std::chrono;
             auto now = system_clock::now();
@@ -129,7 +132,9 @@ namespace fray
          * @brief Write "HH:MM:SS.mmm" into buffer.
          * @param time Output buffer (>=32 bytes).
          */
-        inline F_void getTime(F_char *time, std::chrono::system_clock::time_point now = std::chrono::system_clock::now())
+        inline F_void getTime(
+            F_char *time,
+            std::chrono::system_clock::time_point now = std::chrono::system_clock::now())
         {
             using namespace std::chrono;
             auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
@@ -226,7 +231,9 @@ namespace fray
          * @param fmt Format string.
          * @param ... Variadic args.
          */
-        inline F_void electronInfo(const F_char *fmt, ...)
+        inline F_void electronInfo(
+            const F_char *fmt,
+            ...)
         {
             va_list args;
             va_start(args, fmt);
@@ -239,7 +246,9 @@ namespace fray
          * @param fmt Format string.
          * @param ... Variadic args.
          */
-        inline F_void electronWarn(const F_char *fmt, ...)
+        inline F_void electronWarn(
+            const F_char *fmt,
+            ...)
         {
             va_list args;
             va_start(args, fmt);
@@ -252,7 +261,9 @@ namespace fray
          * @param fmt Format string.
          * @param ... Variadic args.
          */
-        inline F_void electronError(const F_char *fmt, ...)
+        inline F_void electronError(
+            const F_char *fmt,
+            ...)
         {
             va_list args;
             va_start(args, fmt);
@@ -265,7 +276,9 @@ namespace fray
          * @param fmt Format string.
          * @param ... Variadic args.
          */
-        inline F_void electronFatal(const F_char *fmt, ...)
+        inline F_void electronFatal(
+            const F_char *fmt,
+            ...)
         {
             va_list args;
             va_start(args, fmt);
@@ -278,7 +291,9 @@ namespace fray
          * @param fmt Format string.
          * @param ... Variadic args.
          */
-        inline F_void engineInfo(const F_char *fmt, ...)
+        inline F_void engineInfo(
+            const F_char *fmt,
+            ...)
         {
             va_list args;
             va_start(args, fmt);
@@ -286,7 +301,8 @@ namespace fray
             va_end(args);
         }
 
-        inline F_void engineInfo(const std::string& message)
+        inline F_void engineInfo(
+            const std::string& message)
         {
             printf("ENG", ANSI_FG_BLUE, "INF", ANSI_BG_WHITE, message.c_str());
         }
@@ -296,7 +312,9 @@ namespace fray
          * @param fmt Format string.
          * @param ... Variadic args.
          */
-        inline F_void engineWarn(const F_char *fmt, ...)
+        inline F_void engineWarn(
+            const F_char *fmt,
+            ...)
         {
             va_list args;
             va_start(args, fmt);
@@ -309,7 +327,9 @@ namespace fray
          * @param fmt Format string.
          * @param ... Variadic args.
          */
-        inline F_void engineError(const F_char *fmt, ...)
+        inline F_void engineError(
+            const F_char *fmt,
+            ...)
         {
             va_list args;
             va_start(args, fmt);
@@ -322,7 +342,9 @@ namespace fray
          * @param fmt Format string.
          * @param ... Variadic args.
          */
-        inline F_void engineFatal(const F_char *fmt, ...)
+        inline F_void engineFatal(
+            const F_char *fmt,
+            ...)
         {
             va_list args;
             va_start(args, fmt);

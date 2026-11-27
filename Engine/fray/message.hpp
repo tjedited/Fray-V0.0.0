@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -57,7 +58,9 @@ namespace fray
 
         namespace detail
         {
-            inline void put32(F_uchar *out, F_ulong v)
+            inline void put32(
+                F_uchar *out,
+                F_ulong v)
             {
                 out[0] = static_cast<F_uchar>(v >> 24);
                 out[1] = static_cast<F_uchar>(v >> 16);
@@ -65,14 +68,17 @@ namespace fray
                 out[3] = static_cast<F_uchar>(v);
             }
 
-            inline F_ulong get32(const F_uchar *in)
+            inline F_ulong get32(
+                const F_uchar *in)
             {
                 return (static_cast<F_ulong>(in[0]) << 24) | (static_cast<F_ulong>(in[1]) << 16) |
                        (static_cast<F_ulong>(in[2]) << 8) | static_cast<F_ulong>(in[3]);
             }
         }
 
-        inline void encodePrefix(const Prefix &p, F_uchar *out)
+        inline void encodePrefix(
+            const Prefix &p,
+            F_uchar *out)
         {
             out[0] = p.version;
             out[1] = static_cast<F_uchar>(p.destinationKind);
@@ -84,7 +90,10 @@ namespace fray
             detail::put32(out + 19, p.headerLength);
         }
 
-        inline F_err decodePrefix(const F_uchar *data, size_t size, Prefix &out)
+        inline F_err decodePrefix(
+            const F_uchar *data,
+            size_t size,
+            Prefix &out)
         {
             if (size < PREFIX_SIZE)
                 return errors::INVALID_MESSAGE;
@@ -110,8 +119,12 @@ namespace fray
         }
 
         // Builds a full frame. The prefix's length fields are filled in from the header and payload.
-        inline F_err buildFrame(Prefix prefix, const Header &header, const F_uchar *payload, size_t payloadSize,
-                                std::vector<F_uchar> &out)
+        inline F_err buildFrame(
+            Prefix prefix,
+            const Header &header,
+            const F_uchar *payload,
+            size_t payloadSize,
+            std::vector<F_uchar> &out)
         {
             const size_t headerSize = header.ByteSizeLong();
             if (headerSize > static_cast<size_t>(std::numeric_limits<int>::max()) ||
@@ -134,7 +147,8 @@ namespace fray
             return errors::NONE;
         }
 
-        inline const char *processName(ProcessKind kind)
+        inline const char *processName(
+            ProcessKind kind)
         {
             switch (kind)
             {
@@ -155,38 +169,57 @@ namespace fray
             return next.fetch_add(1);
         }
 
-        // Builds a complete frame sent by the engine. destinationId 0 means the default instance.
-        // ttlMs is how long a router may hold the message while its destination is not ready; 0 means forever.
-        inline std::shared_ptr<const std::vector<F_uchar>> makeEngineFrame(
-            ProcessKind destination, F_ulong destinationId, F_ulong command,
-            PayloadType payloadType = PAYLOAD_TYPE_NONE, const std::string &payload = "", uint32_t ttlMs = 0,
-            MessageType messageType = MESSAGE_TYPE_NONE)
+        struct FrameOptions
         {
-            Prefix prefix;
-            prefix.destinationKind = destination;
-            prefix.destinationId = destinationId;
-            prefix.senderKind = PROCESS_KIND_ENGINE;
-            prefix.commandId = command;
-            Header header;
-            header.set_protocol_version(1);
-            header.set_message_id(nextMessageId());
-            header.set_timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-            header.set_sender_name(processName(PROCESS_KIND_ENGINE));
-            header.set_destination_name(processName(destination));
-            header.set_payload_type(payloadType);
-            header.set_message_type(messageType);
-            header.set_ttl_ms(ttlMs);
-            auto frame = std::make_shared<std::vector<F_uchar>>();
-            const F_err err = buildFrame(prefix, header, reinterpret_cast<const F_uchar *>(payload.data()),
-                                         payload.size(), *frame);
-            if (err != errors::NONE)
-                return nullptr;
-            return frame;
-        }
+            ProcessKind destination = PROCESS_KIND_UNSPECIFIED;
+            F_ulong command = 0;
+            F_ulong destinationId = 0;
+            std::string payload;
+            PayloadType payloadType = PAYLOAD_TYPE_NONE;
+            MessageType messageType = MESSAGE_TYPE_NONE;
+            std::optional<std::string> targetProject;
+            uint32_t ttlMs = 0;
+        };
+
+        class FrameBuilder
+        {
+        public:
+            F_err build(
+                const FrameOptions &options,
+                std::shared_ptr<const std::vector<F_uchar>> &out) const
+            {
+                if (!options.payload.empty() && options.payloadType == PAYLOAD_TYPE_NONE)
+                    return errors::INVALID_MESSAGE;
+                Prefix prefix;
+                prefix.destinationKind = options.destination;
+                prefix.destinationId = options.destinationId;
+                prefix.senderKind = PROCESS_KIND_ENGINE;
+                prefix.commandId = options.command;
+                Header header;
+                header.set_protocol_version(1);
+                header.set_message_id(nextMessageId());
+                header.set_timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+                header.set_sender_name(processName(PROCESS_KIND_ENGINE));
+                header.set_destination_name(processName(options.destination));
+                header.set_payload_type(options.payloadType);
+                header.set_message_type(options.messageType);
+                if (options.targetProject) header.set_target_project(*options.targetProject);
+                header.set_ttl_ms(options.ttlMs);
+                auto frame = std::make_shared<std::vector<F_uchar>>();
+                const F_err err = buildFrame(prefix, header, reinterpret_cast<const F_uchar *>(options.payload.data()),
+                                             options.payload.size(), *frame);
+                if (err != errors::NONE)
+                    return err;
+                out = std::move(frame);
+                return errors::NONE;
+            }
+        };
 
         // Parses the header of a complete frame. The payload is not read or copied.
-        inline F_err parseFrame(std::shared_ptr<const std::vector<F_uchar>> frame, InData &out)
+        inline F_err parseFrame(
+            std::shared_ptr<const std::vector<F_uchar>> frame,
+            InData &out)
         {
             if (!frame)
                 return errors::INVALID_MESSAGE;

@@ -22,7 +22,8 @@ namespace fray
             stop
         };
 
-        inline Destination routeMessage(const message::Prefix& prefix)
+        inline Destination routeMessage(
+            const message::Prefix& prefix)
         {
             // The engine hears every broadcast. It never relays one: the only peer it talks to is Electron Main.
             if (prefix.destinationKind == PROCESS_KIND_ENGINE || prefix.destinationKind == PROCESS_KIND_BROADCAST)
@@ -32,7 +33,8 @@ namespace fray
             return Destination::unsupported;
         }
 
-        inline Action handleEngineMessage(const message::InData& incomingMessage)
+        inline Action handleEngineMessage(
+            const message::InData& incomingMessage)
         {
             const auto& prefix = incomingMessage.prefix;
             const auto& header = incomingMessage.header;

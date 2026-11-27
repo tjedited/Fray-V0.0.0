@@ -3,9 +3,7 @@ Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 const node_worker_threads = require("node:worker_threads");
 const log_manager = require("./log_manager.js");
 class ThreadManager {
-  constructor() {
-    this.threads = /* @__PURE__ */ new Map();
-  }
+  threads = /* @__PURE__ */ new Map();
   spawn(name, filename, workerData, transferList = []) {
     if (this.threads.has(name)) throw new Error(`Thread already registered: ${name}`);
     const worker = new node_worker_threads.Worker(filename, { workerData, transferList });

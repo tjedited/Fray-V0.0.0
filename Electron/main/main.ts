@@ -1,10 +1,12 @@
 /* main.js */
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import * as path from 'node:path';
 import * as log from './log_manager';
 import { IPCManager } from './ipc_manager';
 import { ThreadManager } from './thread_manager';
 import * as message from './message';
+import { createMessageHandler } from './message_handler';
+import { createFrameBuilder } from '../shared/frame_builder';
 import type { RendererState } from '../shared/types';
 
 const { ProcessKind } = message;
@@ -18,30 +20,13 @@ const threads = new ThreadManager();
 let ipc: IPCManager | null = null;
 let shuttingDown = false;
 let shutdownComplete = false;
-// Main and its message worker use odd and even IDs respectively.
-let nextMessageId = 1;
+const frames = createFrameBuilder(SELF, 1, message.buildFrame, message.processName);
 let window: BrowserWindow | null = null;
 let rendererState: RendererState | 'gone' = 'starting';
 let rendererThreads: string[] = [];
 let rendererShutdownRequested = false;
 let resolveRendererStopped!: () => void;
 const rendererStopped = new Promise<void>((resolve) => { resolveRendererStopped = resolve; });
-
-function makeFrame(commandId: number, payload: Buffer = Buffer.alloc(0), destinationKind: number = ProcessKind.PROCESS_KIND_ENGINE, destinationId = 0): Buffer {
-  return message.buildFrame({
-    destinationKind,
-    destinationId,
-    senderKind: SELF,
-    commandId,
-  }, {
-    protocolVersion: 1,
-    messageId: (nextMessageId += 2) - 2,
-    timestamp: Date.now(),
-    senderName: message.processName(SELF),
-    destinationName: message.processName(destinationKind),
-    payloadType: payload.length ? message.PayloadType.PAYLOAD_TYPE_JSON : message.PayloadType.PAYLOAD_TYPE_NONE,
-  }, payload);
-}
 
 // Hands a frame to the router thread, which sends it when its destination is ready and holds it until then.
 function send(frame: Buffer): void {
@@ -56,16 +41,7 @@ function send(frame: Buffer): void {
   }
 }
 
-function announceReady(): void {
-  send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
-  send(makeFrame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), ProcessKind.PROCESS_KIND_BROADCAST));
-}
-
-function sendTestFrame(kind: number): void {
-  const payload = kind === ProcessKind.PROCESS_KIND_ENGINE
-    ? Buffer.from(JSON.stringify({ message: 'Hello from Electron Main' })) : Buffer.alloc(0);
-  send(makeFrame(message.Command.COMMAND_TEST, payload, kind));
-}
+const messages = createMessageHandler(frames, send, () => ipc?.connected === true);
 
 function connectToEngine(): void {
   if (!enginePort) {
@@ -77,29 +53,12 @@ function connectToEngine(): void {
   // Electron Main is ready once it is connected to the Engine, because that link is how everyone else reaches it.
   ipc.on('connected', () => {
     if (shuttingDown) return;
-    announceReady();
-    // Each test frame waits in the router's queue until its peer says it is ready.
-    sendTestFrame(ProcessKind.PROCESS_KIND_ENGINE);
-    sendTestFrame(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+    messages.announceReady();
   });
   // A neighbor that has just become ready is answered with our own READY, so it need not ask. Only a change triggers
   // this, so the exchange ends after one reply each way. Until connected, Main is not ready and announces on connect.
-  ipc.on('peer-ready', (kind) => {
-    log.electronInfo('%s is ready.', message.processName(kind));
-    if (ipc && ipc.connected) send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), kind));
-  });
-  ipc.on('message', ({ prefix, header, payload }) => {
-    if (prefix.commandId !== message.Command.COMMAND_PING && prefix.commandId !== message.Command.COMMAND_PONG)
-      log.electronInfo('Received frame: command=%d sender=%s destination=%s protocol=%d message_id=%s timestamp=%s flags=%d payload_type=%d message_type=%d payload_bytes=%d frame_bytes=%d.',
-        prefix.commandId, header.senderName, header.destinationName, header.protocolVersion, header.messageId,
-        header.timestamp, header.flags, header.payloadType, header.messageType, payload.length,
-        message.PREFIX_SIZE + prefix.length);
-    // A request is answered with a READY sent back to the requester only.
-    const sender = prefix.senderKind;
-    if (prefix.commandId === message.Command.COMMAND_REQUEST_READY && sender !== SELF &&
-        sender !== ProcessKind.PROCESS_KIND_BROADCAST && ipc && ipc.connected)
-      send(makeFrame(message.Command.COMMAND_READY, Buffer.alloc(0), sender, prefix.senderId));
-  });
+  ipc.on('peer-ready', messages.onPeerReady);
+  ipc.on('message', messages.onMessage);
   ipc.on('renderer-frame', (frame, broadcast) => sendToRenderer(frame, broadcast));
 }
 
@@ -173,11 +132,23 @@ const createWindow = (): void => {
   const win = new BrowserWindow({
     width: 800,
     height: 600,
+    frame: false,
+    backgroundColor: '#000000',
+    show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false
     }
   })
+  if (process.platform === 'darwin') win.setWindowButtonVisibility(true);
   window = win;
+  let shown = false;
+  const showWindow = (): void => {
+    if (shown || shuttingDown) return;
+    shown = true;
+    win.show();
+  };
+  win.once('ready-to-show', showWindow);
   win.webContents.on('console-message', (event) => {
     if (event.level === 'error') log.electronError('Renderer: %s', event.message);
     else if (event.level === 'warning') log.electronWarn('Renderer: %s', event.message);
@@ -214,6 +185,7 @@ const createWindow = (): void => {
   win.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
     if (!isMainFrame) return;
     log.electronError('Renderer failed to load (%d): %s.', code, description);
+    showWindow();
     if (rendererState === 'starting' && rendererThreads.length === 0) {
       rendererState = 'gone';
       resolveRendererStopped();
@@ -240,7 +212,7 @@ app.on('before-quit', (event) => {
     let finalFrame = null;
     if (ipc.connected) {
       log.electronInfo("Telling the engine to quit.");
-      finalFrame = makeFrame(message.Command.COMMAND_QUIT);
+      finalFrame = frames.build({ command: message.Command.COMMAND_QUIT, destination: ProcessKind.PROCESS_KIND_ENGINE });
     }
     return ipc.close(finalFrame);
   }).catch((err) => {
@@ -252,6 +224,29 @@ app.on('before-quit', (event) => {
 });
 
 app.whenReady().then(() => {
+  const menu: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: 'File',
+      submenu: [
+        { label: 'New Project', enabled: false },
+        { label: 'Open Project', enabled: false },
+        { label: 'Project Preferences', enabled: false },
+        { label: 'Close Project', enabled: false },
+        { label: 'Package Project', enabled: false }
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' }
+      ]
+    }
+  ];
+  if (process.platform === 'darwin') {
+    menu.unshift({ label: app.name, submenu: [{ role: 'quit' }] });
+  }
+  Menu.setApplicationMenu(Menu.buildFromTemplate(menu));
   log.electronInfo("Showing the window.");
   createWindow()
 })

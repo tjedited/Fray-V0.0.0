@@ -36,18 +36,24 @@ namespace fray
                 uint64_t oldestAgeMs;
             };
 
-            explicit OutgoingRouter(Deliver deliver, Now now = [] { return Clock::now(); })
+            explicit OutgoingRouter(
+                Deliver deliver,
+                Now now = [] { return Clock::now(); })
                 : _deliver(std::move(deliver)), _now(std::move(now)) {}
 
-            NeighborState state(Key neighbor) const
+            NeighborState state(
+                Key neighbor) const
             {
                 const auto found = _states.find(neighbor);
                 return found == _states.end() ? NeighborState::unknown : found->second;
             }
 
-            bool isReady(Key neighbor) const { return state(neighbor) == NeighborState::ready; }
+            bool isReady(
+                Key neighbor) const { return state(neighbor) == NeighborState::ready; }
 
-            bool setState(Key neighbor, NeighborState value)
+            bool setState(
+                Key neighbor,
+                NeighborState value)
             {
                 if (value == NeighborState::ready) return markReady(neighbor);
                 if (state(neighbor) == value) return false;
@@ -56,7 +62,8 @@ namespace fray
             }
 
             // Number of messages still waiting for the neighbor.
-            size_t queued(Key neighbor) const
+            size_t queued(
+                Key neighbor) const
             {
                 const auto found = _queues.find(neighbor);
                 return found == _queues.end() ? 0 : found->second.size();
@@ -77,7 +84,8 @@ namespace fray
 
             // Marks the neighbor ready and delivers its waiting messages in order, skipping any that expired.
             // Returns true only when the neighbor was not ready before, so callers act once per transition.
-            bool markReady(Key neighbor)
+            bool markReady(
+                Key neighbor)
             {
                 if (isReady(neighbor))
                     return false;
@@ -96,7 +104,8 @@ namespace fray
 
             // The neighbor can no longer be reached for now. Messages sent to it wait in its queue again.
             // Returns true when it was ready before.
-            bool markNotReady(Key neighbor)
+            bool markNotReady(
+                Key neighbor)
             {
                 const bool wasReady = isReady(neighbor);
                 _states.erase(neighbor);
@@ -105,7 +114,8 @@ namespace fray
 
             // For a neighbor declared down or unreachable: what was waiting for it may no longer make sense, so it is
             // dropped. Returns how many messages were dropped.
-            size_t discardQueue(Key neighbor)
+            size_t discardQueue(
+                Key neighbor)
             {
                 const auto found = _queues.find(neighbor);
                 if (found == _queues.end())
@@ -117,7 +127,10 @@ namespace fray
 
             // Delivers now if the neighbor is ready, otherwise queues. ttlMs 0 means the message never expires.
             // Returns true when the message was delivered immediately.
-            bool send(Key neighbor, Frame frame, uint32_t ttlMs)
+            bool send(
+                Key neighbor,
+                Frame frame,
+                uint32_t ttlMs)
             {
                 if (isReady(neighbor))
                 {

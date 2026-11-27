@@ -74,7 +74,8 @@ namespace fray
                 unsigned _users = 0;
                 std::shared_ptr<int> _lifetime = std::make_shared<int>(0);
 
-                static bool safeRelative(const std::string& name)
+                static bool safeRelative(
+                    const std::string& name)
                 {
                     if (name.empty() || name.find('\0') != std::string::npos ||
                         name.find('\\') != std::string::npos || name.find(':') != std::string::npos)
@@ -88,7 +89,9 @@ namespace fray
                     return true;
                 }
 
-                bool lockProject(const std::filesystem::path& archive, ProjectLock& lock)
+                bool lockProject(
+                    const std::filesystem::path& archive,
+                    ProjectLock& lock)
                 {
                     auto lockPath = archive;
                     lockPath.replace_extension(".lock");
@@ -138,7 +141,8 @@ namespace fray
                 }
 
 #ifndef _WIN32
-                static bool lockIntact(const ProjectLock& lock)
+                static bool lockIntact(
+                    const ProjectLock& lock)
                 {
                     struct stat descriptor, pathStatus;
                     return lock.handle >= 0 && fstat(lock.handle, &descriptor) == 0 &&
@@ -161,7 +165,8 @@ namespace fray
 #endif
                 }
 
-                static bool unlockProject(ProjectLock& lock)
+                static bool unlockProject(
+                    ProjectLock& lock)
                 {
 #ifdef _WIN32
                     if (lock.handle == INVALID_HANDLE_VALUE)
@@ -208,7 +213,8 @@ namespace fray
 
                 // Copies <workspace>/<stem>.sqlite into <workspace>/snapshots as <stem>-<yyyymmddhhmmss>[-#].sqlite.
                 // Call while the database is closed. A missing database is not an error.
-                bool snapshotDatabase(const std::string& stem)
+                bool snapshotDatabase(
+                    const std::string& stem)
                 {
                     const auto database = _workspace / (stem + ".sqlite");
                     bool exists;
@@ -266,7 +272,9 @@ namespace fray
                 }
 
                 // Locks the archive path the project will have under `newName`; fails if it is taken.
-                bool acquireRename(const std::string& newName, ProjectLock& lock)
+                bool acquireRename(
+                    const std::string& newName,
+                    ProjectLock& lock)
                 {
                     restoreLock();
                     const auto newArchive = _archive.parent_path() / (newName + ".fry");
@@ -281,7 +289,10 @@ namespace fray
                     return lockProject(newArchive, lock);
                 }
 
-                void commitRename(const std::string& newName, const std::filesystem::path& workspace, ProjectLock& lock)
+                void commitRename(
+                    const std::string& newName,
+                    const std::filesystem::path& workspace,
+                    ProjectLock& lock)
                 {
                     ProjectLock previous = _lock;
                     _lock = lock;
@@ -293,7 +304,9 @@ namespace fray
                         fray::log::engineError("The previous project lock could not be removed.");
                 }
 
-                static bool pathExists(const std::filesystem::path& path, bool& exists)
+                static bool pathExists(
+                    const std::filesystem::path& path,
+                    bool& exists)
                 {
                     std::error_code error;
                     const auto status = std::filesystem::symlink_status(path, error);
@@ -306,8 +319,10 @@ namespace fray
                     return true;
                 }
 
-                static bool unusedPath(const std::filesystem::path& parent, const std::string& stem,
-                                       std::filesystem::path& output)
+                static bool unusedPath(
+                    const std::filesystem::path& parent,
+                    const std::string& stem,
+                    std::filesystem::path& output)
                 {
                     for (unsigned i = 1; i < 100000; ++i)
                     {
@@ -326,7 +341,9 @@ namespace fray
                     return false;
                 }
 
-                static bool renameExclusive(const std::filesystem::path& from, const std::filesystem::path& to)
+                static bool renameExclusive(
+                    const std::filesystem::path& from,
+                    const std::filesystem::path& to)
                 {
 #ifdef _WIN32
                     if (MoveFileW(from.c_str(), to.c_str()) != 0)
@@ -348,8 +365,10 @@ namespace fray
                     return false;
                 }
 
-                static bool renameFolderDatabase(const std::filesystem::path& folder,
-                                                 const std::string& oldName, const std::string& newName)
+                static bool renameFolderDatabase(
+                    const std::filesystem::path& folder,
+                    const std::string& oldName,
+                    const std::string& newName)
                 {
                     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> renamed;
                     for (const char* suffix : {".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal"})
@@ -385,8 +404,10 @@ namespace fray
                     return true;
                 }
 
-                static bool renameArchiveDatabase(const std::filesystem::path& path,
-                                                  const std::string& oldName, const std::string& newName)
+                static bool renameArchiveDatabase(
+                    const std::filesystem::path& path,
+                    const std::string& oldName,
+                    const std::string& newName)
                 {
                     int error = 0;
                     zip_t* archive = zip_open(path.string().c_str(), ZIP_CHECKCONS, &error);
@@ -542,8 +563,10 @@ namespace fray
 
             public:
                 FileManager() = default;
-                FileManager(const FileManager&) = delete;
-                FileManager& operator=(const FileManager&) = delete;
+                FileManager(
+                    const FileManager&) = delete;
+                FileManager& operator=(
+                    const FileManager&) = delete;
 
                 ~FileManager()
                 {
@@ -571,7 +594,9 @@ namespace fray
                 const std::filesystem::path& workingDirectory() const { return _workspace; }
                 const std::filesystem::path& archivePath() const { return _archive; }
 
-                F_err filePath(const std::string& name, std::filesystem::path& result) const
+                F_err filePath(
+                    const std::string& name,
+                    std::filesystem::path& result) const
                 {
                     if (!isOpen() || !safeRelative(name))
                     {
@@ -595,7 +620,9 @@ namespace fray
                     return fray::errors::NONE;
                 }
 
-                F_err open(const std::string& path, ConflictChoice choice = ConflictChoice::Ask)
+                F_err open(
+                    const std::string& path,
+                    ConflictChoice choice = ConflictChoice::Ask)
                 {
                     if (isOpen() || !_lock.path.empty() || !_extraLock.path.empty() ||
                         path.empty() || path.find('\0') != std::string::npos)

@@ -23,6 +23,7 @@
 #include "outgoing_router.hpp"
 #include "thread_manager.hpp"
 #include "types.hpp"
+#include "fray_manager.hpp"
 
 namespace fray
 {
@@ -50,13 +51,21 @@ namespace fray
                      std::deque<Frame>> _outgoing;
 
             F_void accept();
-            F_void startRead(std::shared_ptr<boost::asio::ip::tcp::socket> session);
-            F_void write(Socket session, Frame frame);
-            F_void writeNext(std::shared_ptr<boost::asio::ip::tcp::socket> session);
-            F_void closeSession(Socket session);
+            F_void startRead(
+                std::shared_ptr<boost::asio::ip::tcp::socket> session);
+            F_void write(
+                Socket session,
+                Frame frame);
+            F_void writeNext(
+                std::shared_ptr<boost::asio::ip::tcp::socket> session);
+            F_void closeSession(
+                Socket session);
 
         public:
-            TCPServer(boost::asio::io_context &ctx, F_ushort port, IPCManager *manager)
+            TCPServer(
+                boost::asio::io_context &ctx,
+                F_ushort port,
+                IPCManager *manager)
                 : _acceptor(ctx, {boost::asio::ip::tcp::v4(), port}),
                   _port(port),
                   _manager(manager)
@@ -71,13 +80,17 @@ namespace fray
                 fray::log::engineInfo("Destroyed TCPServer on port %d.", _port);
             }
 
-            F_void setConnectionHandler(ConnectionHandler handler) { _connectionHandler = std::move(handler); }
+            F_void setConnectionHandler(
+                ConnectionHandler handler) { _connectionHandler = std::move(handler); }
             F_void start() { accept(); }
             F_void stop();
             // Queues a message for every connected client. Network thread only; use IPCManager::send elsewhere.
-            F_void broadcast(Frame frame);
+            F_void broadcast(
+                Frame frame);
             // Network thread only.
-            F_void sendTo(Socket session, Frame frame)
+            F_void sendTo(
+                Socket session,
+                Frame frame)
             {
                 if (!session || !frame)
                 {
@@ -111,16 +124,17 @@ namespace fray
             uint64_t _heartbeat = 0;
             uint64_t _processedCount = 0;
             std::chrono::steady_clock::time_point _lastProgress = std::chrono::steady_clock::now();
+            FrayManager &_application;
             // Owned by the engine message thread, which is the router: nothing else may touch it.
             routing::OutgoingRouter<ProcessKind, Frame> _outgoing{
                 [this](ProcessKind, const Frame &frame) { transmit(frame); }};
             routing::NeighborMonitor<ProcessKind> _monitor{
                 [this](ProcessKind neighbor, routing::MonitorCommand command)
                 {
-                    const auto id = command == routing::MonitorCommand::probe ? COMMAND_REQUEST_READY : COMMAND_PING;
+                    const F_ulong id = command == routing::MonitorCommand::probe ? COMMAND_REQUEST_READY : COMMAND_PING;
                     if (command == routing::MonitorCommand::probe)
                         fray::log::engineInfo("Sending readiness probe to %s.", message::processName(neighbor));
-                    send(message::makeEngineFrame(neighbor, 0, id));
+                    sendBuilt({neighbor, id});
                 },
                 [this](ProcessKind neighbor) { return _outgoing.state(neighbor); },
                 [this](ProcessKind neighbor, routing::NeighborState state)
@@ -150,15 +164,21 @@ namespace fray
             threads::ThreadManager *_threads;
 
         public:
+            // FrayManager must outlive IPCManager, which drains its application and project work on shutdown.
             // Uses its own ThreadManager, which is convenient for tests.
-            IPCManager()
-                : _ownedThreads(std::make_unique<threads::ThreadManager>()), _threads(_ownedThreads.get())
+            explicit IPCManager(
+                FrayManager &application)
+                : _application(application), _ownedThreads(std::make_unique<threads::ThreadManager>()),
+                  _threads(_ownedThreads.get())
             {
                 fray::log::engineInfo("Constructed IPCManager.");
             }
 
             // Registers its threads with a ThreadManager owned by someone else, which must outlive this object.
-            explicit IPCManager(threads::ThreadManager &threads) : _threads(&threads)
+            IPCManager(
+                threads::ThreadManager &threads,
+                FrayManager &application)
+                : _application(application), _threads(&threads)
             {
                 fray::log::engineInfo("Constructed IPCManager.");
             }
@@ -177,12 +197,14 @@ namespace fray
                         if (s)
                             s->stop();
                 }
+                _application.shutdown();
                 _servers.clear();
                 fray::log::engineInfo("Destroyed IPCManager.");
             }
 
             // Servers must be created before start().
-            TCPServerSP createTCPServer(F_ushort port)
+            TCPServerSP createTCPServer(
+                F_ushort port)
             {
                 auto s = std::make_shared<TCPServer>(_io, port, this);
                 s->start();
@@ -190,7 +212,8 @@ namespace fray
                 return s;
             }
 
-            F_void removeTCPServer(F_ushort port)
+            F_void removeTCPServer(
+                F_ushort port)
             {
                 auto it = std::find_if(_servers.begin(), _servers.end(),
                                        [port](const TCPServerSP &sp)
@@ -280,7 +303,8 @@ namespace fray
             // The router delivers it now if its destination is ready, otherwise it waits in that destination's queue
             // for as long as the header's ttl_ms allows (0 = until the destination is ready).
             // Nothing is sent back to the caller either way.
-            F_void send(Frame frame)
+            F_void send(
+                Frame frame)
             {
                 if (!frame)
                 {
@@ -291,9 +315,23 @@ namespace fray
                     fray::log::engineError("Cannot send message: message thread is shutting down.");
             }
 
+            F_void sendBuilt(
+                const message::FrameOptions &options)
+            {
+                Frame frame;
+                const F_err err = message::FrameBuilder{}.build(options, frame);
+                if (err != errors::NONE)
+                {
+                    fray::log::engineError("Cannot build message: %s", errors::description(err));
+                    return;
+                }
+                send(std::move(frame));
+            }
+
             // Router thread only. Readiness messages and broadcasts always go out at once, because they are how
             // readiness is learned and who is reachable is not known yet. Everything else goes through the outgoing queue.
-            F_void route(const Frame &frame)
+            F_void route(
+                const Frame &frame)
             {
                 message::InData outgoing;
                 const F_err err = message::parseFrame(frame, outgoing);
@@ -318,7 +356,8 @@ namespace fray
             }
 
             // Writes a frame to every connected client. Safe from any thread.
-            F_void transmit(Frame frame)
+            F_void transmit(
+                Frame frame)
             {
                 boost::asio::post(_io, [this, frame = std::move(frame)]()
                                   {
@@ -329,7 +368,8 @@ namespace fray
 
             // A READY marks the sender ready and delivers whatever was waiting for it. A REQUEST_READY is answered with
             // a READY sent back to the sender only, so no peer ever has to announce to everyone because someone else asked.
-            F_void handleReadiness(const message::InData &incoming)
+            F_void handleReadiness(
+                const message::InData &incoming)
             {
                 const auto &prefix = incoming.prefix;
                 if (prefix.senderKind == PROCESS_KIND_ENGINE || prefix.senderKind == PROCESS_KIND_BROADCAST)
@@ -345,12 +385,12 @@ namespace fray
                     if (!wasReady && _outgoing.isReady(prefix.senderKind))
                     {
                         fray::log::engineInfo("%s is ready.", message::processName(prefix.senderKind));
-                        send(message::makeEngineFrame(prefix.senderKind, prefix.senderId, COMMAND_READY));
+                        sendBuilt({prefix.senderKind, COMMAND_READY, prefix.senderId});
                     }
                 }
                 else if (prefix.commandId == COMMAND_REQUEST_READY)
                 {
-                    send(message::makeEngineFrame(prefix.senderKind, prefix.senderId, COMMAND_READY));
+                    sendBuilt({prefix.senderKind, COMMAND_READY, prefix.senderId});
                 }
                 else if (prefix.commandId == COMMAND_PING)
                 {
@@ -366,8 +406,11 @@ namespace fray
                         item->set_depth(queue.depth);
                         item->set_oldest_age_ms(queue.oldestAgeMs);
                     }
-                    send(message::makeEngineFrame(prefix.senderKind, prefix.senderId, COMMAND_PONG,
-                        PAYLOAD_TYPE_PROTOBUF, report.SerializeAsString(), 0, MESSAGE_TYPE_HEALTH_REPORT));
+                    message::FrameOptions options{prefix.senderKind, COMMAND_PONG, prefix.senderId};
+                    options.payload = report.SerializeAsString();
+                    options.payloadType = PAYLOAD_TYPE_PROTOBUF;
+                    options.messageType = MESSAGE_TYPE_HEALTH_REPORT;
+                    sendBuilt(options);
                 }
                 else if (prefix.commandId == COMMAND_PONG)
                 {
@@ -392,7 +435,8 @@ namespace fray
             }
 
             // Called by the network thread: queues a received message for the engine message thread.
-            F_void queueMessage(Frame frame)
+            F_void queueMessage(
+                Frame frame)
             {
                 if (!_messages.post([this, frame = std::move(frame)]()
                                {
@@ -418,7 +462,14 @@ namespace fray
                             _lastProgress = std::chrono::steady_clock::now();
                         }
                         if (routing::handleEngineMessage(incoming) == routing::Action::stop) stop();
-                        else handleReadiness(incoming);
+                        else
+                        {
+                            handleReadiness(incoming);
+                            if (prefix.commandId != COMMAND_READY &&
+                                prefix.commandId != COMMAND_REQUEST_READY && prefix.commandId != COMMAND_PING &&
+                                prefix.commandId != COMMAND_PONG)
+                                _application.handleApplicationMessage(incoming, *this);
+                        }
                     } }))
                     fray::log::engineError("Cannot queue message: message thread is shutting down.");
             }
@@ -510,7 +561,8 @@ namespace fray
                 });
         }
 
-        inline F_void TCPServer::broadcast(Frame frame)
+        inline F_void TCPServer::broadcast(
+            Frame frame)
         {
             if (_stopped)
                 return;
@@ -530,7 +582,8 @@ namespace fray
                 writeNext(session);
         }
 
-        inline F_void TCPServer::writeNext(std::shared_ptr<boost::asio::ip::tcp::socket> session)
+        inline F_void TCPServer::writeNext(
+            std::shared_ptr<boost::asio::ip::tcp::socket> session)
         {
             const auto found = _outgoing.find(session);
             if (found == _outgoing.end() || found->second.empty())
@@ -558,7 +611,8 @@ namespace fray
                 });
         }
 
-        inline F_void TCPServer::closeSession(Socket session)
+        inline F_void TCPServer::closeSession(
+            Socket session)
         {
             boost::system::error_code ec;
             session->close(ec);
@@ -597,5 +651,8 @@ namespace fray
 
     } // namespace ipc
 } // namespace fray
+
+// The handler needs the complete IPCManager type to send its response.
+#include "fray_manager_message.hpp"
 
 #endif

@@ -24,9 +24,25 @@ declare module 'virtual:fray-schema' {
     toObject(message: HealthMessage, options?: { defaults?: boolean; longs?: StringConstructor }): object;
   }
 
+  interface ProjectOpenRequestStatic {
+    fromObject(object: { name: string }): object;
+    encode(message: object): { finish(): Uint8Array };
+  }
+  interface ProjectOpenResultMessage {
+    name: string;
+    success: boolean;
+    error: string;
+    requestId: number | { toString(): string };
+  }
+  interface ProjectOpenResultStatic {
+    decode(bytes: Uint8Array): ProjectOpenResultMessage;
+  }
+
   export namespace fray {
     const Header: HeaderStatic;
     const HealthReport: HealthStatic;
+    const ProjectOpenRequest: ProjectOpenRequestStatic;
+    const ProjectOpenResult: ProjectOpenResultStatic;
     const ProcessKind: EnumValues;
     const PayloadType: EnumValues;
     const MessageType: EnumValues;

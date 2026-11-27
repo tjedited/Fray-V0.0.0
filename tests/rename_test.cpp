@@ -142,6 +142,21 @@ int main(int argc, char** argv)
         assert(fs::exists(folder / "one.sqlite") && fs::exists(folder / "two.sqlite"));
         assert(app.closeProject("Fresh") == fray::errors::NONE);
     }
+    {
+        const fs::path folder = root / "NoDecision";
+        makeFrayDatabase(folder / "one.sqlite", "one");
+        makeFrayDatabase(folder / "two.sqlite", "two");
+        fray::FrayManager app;
+        std::atomic<int> completions{0};
+        for (int i = 0; i < 2; ++i)
+        {
+            auto future = app.openProject(folder.string(), fray::files::ConflictChoice::Ask,
+                [&](F_err result) { assert(result == fray::errors::DATABASE_CONFLICT); ++completions; }, true);
+            assert(future.get() == fray::errors::DATABASE_CONFLICT);
+            assert(!fs::exists(root / "NoDecision.lock"));
+        }
+        assert(completions == 2);
+    }
 
     // Cancelling removes a folder that was only extracted for the choice and keeps the .fry file.
     {

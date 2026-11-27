@@ -1,17 +1,5 @@
-import React, { useState } from 'react';
+import React from 'react';
 
 export default function App(): React.JSX.Element {
-  const [text, setText] = useState<string>('');
-
-  return (
-    <div>
-      <input
-        type="text"
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        placeholder="Project name"
-      />
-      <button type="button">Add</button>
-    </div>
-  );
+  return <header className={window.platform === 'darwin' ? 'title-bar title-bar-mac' : 'title-bar'} aria-hidden="true" />;
 }

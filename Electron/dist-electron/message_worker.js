@@ -5,13 +5,14 @@ const message_router = require("./message_router.js");
 const outgoing_router = require("./outgoing_router.js");
 const neighbor_monitor = require("./shared/neighbor_monitor.js");
 const health = require("./shared/health.js");
+const frame_builder = require("./shared/frame_builder.js");
 const { ProcessKind, Command } = message;
 const SELF = ProcessKind.PROCESS_KIND_ELECTRON_MAIN;
 const parent = node_worker_threads.parentPort;
 const networkPort = node_worker_threads.workerData.port;
 let invalid = false;
 let monitorTimer;
-let nextMonitorId = 2;
+const frames = frame_builder.createFrameBuilder(SELF, 2, message.buildFrame, message.processName);
 let heartbeat = 0;
 let processedCount = 0;
 let lastProgress = performance.now();
@@ -21,20 +22,14 @@ const TARGET_KINDS = {
 };
 const outgoing = new outgoing_router.OutgoingRouter((kind, bytes) => forward(kind === ProcessKind.PROCESS_KIND_ENGINE ? "engine" : "electron-renderer", bytes, false));
 function control(kind, commandId, destinationId = 0, payload = new Uint8Array()) {
-  const bytes = Uint8Array.from(message.buildFrame({
-    destinationKind: kind,
+  const bytes = Uint8Array.from(frames.build({
+    destination: kind,
     destinationId,
-    senderKind: SELF,
-    commandId
-  }, {
-    protocolVersion: 1,
-    messageId: (nextMonitorId += 2) - 2,
-    timestamp: Date.now(),
-    senderName: message.processName(SELF),
-    destinationName: message.processName(kind),
+    command: commandId,
+    payload,
     payloadType: commandId === Command.COMMAND_PONG ? message.PayloadType.PAYLOAD_TYPE_PROTOBUF : message.PayloadType.PAYLOAD_TYPE_NONE,
     messageType: commandId === Command.COMMAND_PONG ? message.MessageType.MESSAGE_TYPE_HEALTH_REPORT : message.MessageType.MESSAGE_TYPE_NONE
-  }, payload));
+  }));
   routeFrame(bytes.buffer, "local");
 }
 function healthPayload() {

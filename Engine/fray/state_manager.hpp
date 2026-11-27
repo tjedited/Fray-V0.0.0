@@ -62,7 +62,8 @@ namespace fray
                     _applicationId.clear();
                 }
 
-                static std::string tableName(const std::string& name)
+                static std::string tableName(
+                    const std::string& name)
                 {
                     static constexpr F_char hex[] = "0123456789abcdef";
                     std::string result = "fray_state_";
@@ -74,7 +75,8 @@ namespace fray
                     return result;
                 }
 
-                F_bool createTable(const std::string& name)
+                F_bool createTable(
+                    const std::string& name)
                 {
                     F_bool exists;
                     if (!tableExists(name.c_str(), exists))
@@ -114,7 +116,8 @@ namespace fray
                         fray::log::engineError("Failed to roll back store transaction: %s", sqlite3_errmsg(_db));
                 }
 
-                F_bool validKey(const std::string& key) const
+                F_bool validKey(
+                    const std::string& key) const
                 {
                     if (key.empty() || key.find('\0') != std::string::npos)
                     {
@@ -124,7 +127,9 @@ namespace fray
                     return true;
                 }
 
-                F_bool tableExists(const F_char* name, F_bool& exists)
+                F_bool tableExists(
+                    const F_char* name,
+                    F_bool& exists)
                 {
                     sqlite3_stmt* raw = nullptr;
                     const int prepared = sqlite3_prepare_v2(_db,
@@ -156,7 +161,9 @@ namespace fray
                     return true;
                 }
 
-                F_bool hasExpectedColumns(const F_char* table, std::initializer_list<const F_char*> expected)
+                F_bool hasExpectedColumns(
+                    const F_char* table,
+                    std::initializer_list<const F_char*> expected)
                 {
                     sqlite3_stmt* raw = nullptr;
                     const int prepared = sqlite3_prepare_v2(_db, "SELECT name FROM pragma_table_xinfo(?)",
@@ -193,7 +200,10 @@ namespace fray
                     return true;
                 }
 
-                F_err statementFailure(Statement& statement, const F_char* operation, F_err failure)
+                F_err statementFailure(
+                    Statement& statement,
+                    const F_char* operation,
+                    F_err failure)
                 {
                     const std::string error = sqlite3_errmsg(_db);
                     statement.reset();
@@ -209,7 +219,8 @@ namespace fray
                     return failure;
                 }
 
-                static std::string escaped(const std::string& text)
+                static std::string escaped(
+                    const std::string& text)
                 {
                     static constexpr F_char hex[] = "0123456789abcdef";
                     std::string result;
@@ -232,7 +243,9 @@ namespace fray
                     return result;
                 }
 
-                static F_void logSet(const std::string& key, const Value& value)
+                static F_void logSet(
+                    const std::string& key,
+                    const Value& value)
                 {
                     std::string formatted;
                     if (const auto* text = std::get_if<std::string>(&value))
@@ -260,7 +273,10 @@ namespace fray
                     fray::log::engineInfo("Set state \"" + escaped(key) + "\" = " + formatted);
                 }
 
-                F_err write(const std::string& key, const Value& value, F_bool retry = true)
+                F_err write(
+                    const std::string& key,
+                    const Value& value,
+                    F_bool retry = true)
                 {
                     std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
@@ -353,7 +369,10 @@ namespace fray
                 }
 
                 template<typename T>
-                F_err read(const std::string& key, T& output, int expectedType)
+                F_err read(
+                    const std::string& key,
+                    T& output,
+                    int expectedType)
                 {
                     std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
@@ -456,8 +475,10 @@ namespace fray
 
             public:
                 StateManager() = default;
-                StateManager(const StateManager&) = delete;
-                StateManager& operator=(const StateManager&) = delete;
+                StateManager(
+                    const StateManager&) = delete;
+                StateManager& operator=(
+                    const StateManager&) = delete;
 
                 ~StateManager()
                 {
@@ -470,8 +491,10 @@ namespace fray
                     releaseProject();
                 }
 
-                F_err open(fray::files::FileManager& files, const std::string& table = "Fray",
-                           const std::string& applicationId = "")
+                F_err open(
+                    fray::files::FileManager& files,
+                    const std::string& table = "Fray",
+                    const std::string& applicationId = "")
                 {
                     std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (!files.isOpen())
@@ -564,8 +587,12 @@ namespace fray
                     return fray::errors::NONE;
                 }
 
-                F_err set(const std::string& key, const std::string& value) { return write(key, Value(value)); }
-                F_err set(const std::string& key, const F_char* value)
+                F_err set(
+                    const std::string& key,
+                    const std::string& value) { return write(key, Value(value)); }
+                F_err set(
+                    const std::string& key,
+                    const F_char* value)
                 {
                     if (value == nullptr)
                     {
@@ -574,12 +601,20 @@ namespace fray
                     }
                     return set(key, std::string(value));
                 }
-                F_err set(const std::string& key, double value) { return write(key, Value(value)); }
-                F_err set(const std::string& key, bool value) { return write(key, Value(value)); }
-                F_err set(const std::string& key, const Binary& value) { return write(key, Value(value)); }
+                F_err set(
+                    const std::string& key,
+                    double value) { return write(key, Value(value)); }
+                F_err set(
+                    const std::string& key,
+                    bool value) { return write(key, Value(value)); }
+                F_err set(
+                    const std::string& key,
+                    const Binary& value) { return write(key, Value(value)); }
 
                 template<typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
-                F_err set(const std::string& key, T value)
+                F_err set(
+                    const std::string& key,
+                    T value)
                 {
                     if constexpr (std::is_unsigned_v<T>)
                     {
@@ -593,12 +628,22 @@ namespace fray
                     return write(key, Value(static_cast<std::int64_t>(value)));
                 }
 
-                F_err get(const std::string& key, std::string& value) { return read(key, value, 1); }
-                F_err get(const std::string& key, double& value) { return read(key, value, 3); }
-                F_err get(const std::string& key, bool& value) { return read(key, value, 4); }
-                F_err get(const std::string& key, Binary& value) { return read(key, value, 5); }
+                F_err get(
+                    const std::string& key,
+                    std::string& value) { return read(key, value, 1); }
+                F_err get(
+                    const std::string& key,
+                    double& value) { return read(key, value, 3); }
+                F_err get(
+                    const std::string& key,
+                    bool& value) { return read(key, value, 4); }
+                F_err get(
+                    const std::string& key,
+                    Binary& value) { return read(key, value, 5); }
 
-                F_err contains(const std::string& key, F_bool& exists)
+                F_err contains(
+                    const std::string& key,
+                    F_bool& exists)
                 {
                     std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
@@ -628,7 +673,9 @@ namespace fray
                     return fray::errors::NONE;
                 }
 
-                F_err get(const std::string& key, float& value)
+                F_err get(
+                    const std::string& key,
+                    float& value)
                 {
                     double stored;
                     const F_err result = read(key, stored, 3);
@@ -645,7 +692,9 @@ namespace fray
                 }
 
                 template<typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
-                F_err get(const std::string& key, T& value)
+                F_err get(
+                    const std::string& key,
+                    T& value)
                 {
                     std::int64_t stored;
                     const F_err result = read(key, stored, 2);
@@ -670,7 +719,8 @@ namespace fray
                     return fray::errors::NONE;
                 }
 
-                F_err remove(const std::string& key)
+                F_err remove(
+                    const std::string& key)
                 {
                     std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr)
@@ -735,7 +785,8 @@ namespace fray
                     return fray::errors::NONE;
                 }
 
-                F_err renameTable(const std::string& name)
+                F_err renameTable(
+                    const std::string& name)
                 {
                     std::lock_guard<std::recursive_mutex> lock(_mutex);
                     if (_db == nullptr || name.empty() || name.find('\0') != std::string::npos)

@@ -26,7 +26,8 @@ namespace fray
         bool createNew = false;
         std::string name;   // Candidate to adopt (file name without ".sqlite").
 
-        static DatabaseChoice use(const std::string& candidate) { return {false, candidate}; }
+        static DatabaseChoice use(
+            const std::string& candidate) { return {false, candidate}; }
         static DatabaseChoice create() { return {true, ""}; }
     };
 
@@ -35,6 +36,15 @@ namespace fray
     // out by state() are individually thread-safe as well.
     class ProjectManager
     {
+        public:
+            static bool validProjectName(
+                const std::string& name)
+            {
+                return files::FileManager::safeRelative(name) && name.find('/') == std::string::npos &&
+                       name != "." && name != ".." &&
+                       !(name.size() >= 4 && name.compare(name.size() - 4, 4, ".fry") == 0);
+            }
+
         private:
             mutable std::recursive_mutex _mutex;
             files::FileManager _files;
@@ -58,15 +68,9 @@ namespace fray
             threads::ThreadManager::Id _watcherThread = 0;
             std::function<void(const std::string&, const std::string&)> _onRenamed;
 
-            static bool validProjectName(const std::string& name)
-            {
-                return files::FileManager::safeRelative(name) && name.find('/') == std::string::npos &&
-                       name != "." && name != ".." &&
-                       !(name.size() >= 4 && name.compare(name.size() - 4, 4, ".fry") == 0);
-            }
-
             // Only the current "fray_state_<hex of Fray>" table (key, type, value) counts as a Fray database.
-            static bool looksLikeFrayDatabase(const std::filesystem::path& path)
+            static bool looksLikeFrayDatabase(
+                const std::filesystem::path& path)
             {
                 sqlite3* db = nullptr;
                 const std::string file = path.string();
@@ -84,7 +88,8 @@ namespace fray
                 return valid;
             }
 
-            static std::vector<std::string> databaseFiles(const std::filesystem::path& folder)
+            static std::vector<std::string> databaseFiles(
+                const std::filesystem::path& folder)
             {
                 std::vector<std::string> stems;
                 std::error_code error;
@@ -103,7 +108,8 @@ namespace fray
             }
 
             // Finds which database file belongs to this project, even if it was renamed.
-            std::string locateDatabase(const std::filesystem::path& folder) const
+            std::string locateDatabase(
+                const std::filesystem::path& folder) const
             {
                 watch::FileId id;
                 const std::string current = _files.projectName();
@@ -140,7 +146,8 @@ namespace fray
                 return errors::DATABASE_CONFLICT;
             }
 
-            void abandon(bool removeExtracted)
+            void abandon(
+                bool removeExtracted)
             {
                 if (removeExtracted && _files._extracted && _files.removeWorkingDirectory() != errors::NONE)
                     log::engineError("Could not remove the extracted working folder.");
@@ -155,7 +162,10 @@ namespace fray
             // Writes each default setting that the database does not have yet, so settings added in a
             // newer build appear in existing projects. Runs on the thread that opens the project.
             template<typename T>
-            static F_err setDefault(state::StateManager& state, const std::string& key, const T& value)
+            static F_err setDefault(
+                state::StateManager& state,
+                const std::string& key,
+                const T& value)
             {
                 F_bool exists = false;
                 const F_err result = state.contains(key, exists);
@@ -164,7 +174,8 @@ namespace fray
                 return state.set(key, value);
             }
 
-            F_err applyDefaults(state::StateManager& state)
+            F_err applyDefaults(
+                state::StateManager& state)
             {
                 F_err result = errors::NONE;
                 const auto apply = [&](const std::string& key, const auto& value)
@@ -268,7 +279,8 @@ namespace fray
                 _watcher.unwatch();
             }
 
-            void onChange(const watch::Change& change)
+            void onChange(
+                const watch::Change& change)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (!_open || _closing)
@@ -305,8 +317,11 @@ namespace fray
             // Renames the project: folder, database files, lock, archive and project.info.name together.
             // `workspace` is where the folder is now. With renameFolder false the folder was already
             // renamed (by the user) and only the rest follows; otherwise Fray renames the folder too.
-            F_err applyName(const std::string& newName, const std::filesystem::path& workspace,
-                            bool renameFolder, std::string databaseStem)
+            F_err applyName(
+                const std::string& newName,
+                const std::filesystem::path& workspace,
+                bool renameFolder,
+                std::string databaseStem)
             {
                 using Files = files::FileManager;
                 const std::string oldName = _files.projectName();
@@ -411,8 +426,10 @@ namespace fray
 
         public:
             ProjectManager() = default;
-            ProjectManager(const ProjectManager&) = delete;
-            ProjectManager& operator=(const ProjectManager&) = delete;
+            ProjectManager(
+                const ProjectManager&) = delete;
+            ProjectManager& operator=(
+                const ProjectManager&) = delete;
 
             ~ProjectManager()
             {
@@ -422,10 +439,12 @@ namespace fray
                     cancelOpen();
             }
 
-            F_err open(const std::string& path, const std::string& applicationId,
-                       files::ConflictChoice choice = files::ConflictChoice::Ask,
-                       threads::ThreadManager* threads = nullptr,
-                       std::shared_ptr<threads::TaskQueue> queue = nullptr)
+            F_err open(
+                const std::string& path,
+                const std::string& applicationId,
+                files::ConflictChoice choice = files::ConflictChoice::Ask,
+                threads::ThreadManager* threads = nullptr,
+                std::shared_ptr<threads::TaskQueue> queue = nullptr)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (_open || _files.isOpen() || _pendingDatabase)
@@ -461,7 +480,8 @@ namespace fray
                 return _candidates;
             }
 
-            F_err resolveDatabase(const DatabaseChoice& choice)
+            F_err resolveDatabase(
+                const DatabaseChoice& choice)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (!_pendingDatabase)
@@ -505,8 +525,9 @@ namespace fray
 
             // Registers a thread that belongs to this project. The project's own thread stays alive
             // while any registered thread runs. Returns 0 without a ThreadManager.
-            threads::ThreadManager::Id registerThread(const std::string& name,
-                                                      std::function<void(threads::StopToken)> body)
+            threads::ThreadManager::Id registerThread(
+                const std::string& name,
+                std::function<void(threads::StopToken)> body)
             {
                 std::lock_guard<std::mutex> lock(_threadMutex);
                 if (_threads == nullptr)
@@ -516,7 +537,8 @@ namespace fray
                 return id;
             }
 
-            void stopThread(threads::ThreadManager::Id id)
+            void stopThread(
+                threads::ThreadManager::Id id)
             {
                 threads::ThreadManager* threads;
                 {
@@ -541,7 +563,8 @@ namespace fray
                 return false;
             }
 
-            void setRenameCallback(std::function<void(const std::string&, const std::string&)> callback)
+            void setRenameCallback(
+                std::function<void(const std::string&, const std::string&)> callback)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 _onRenamed = std::move(callback);
@@ -572,7 +595,8 @@ namespace fray
                 return errors::NONE;
             }
 
-            F_err rename(const std::string& newName)
+            F_err rename(
+                const std::string& newName)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (!_open || _closing)
@@ -598,7 +622,8 @@ namespace fray
             }
             files::FileManager& fileManager() { return _files; }
 
-            F_err openState(const std::string& name)
+            F_err openState(
+                const std::string& name)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (!_open || _closing)
@@ -617,7 +642,8 @@ namespace fray
                 return errors::NONE;
             }
 
-            state::StateManager& state(const std::string& name)
+            state::StateManager& state(
+                const std::string& name)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 const auto found = _states.find(name);
@@ -627,7 +653,9 @@ namespace fray
             }
 
             template<typename T>
-            F_err set(const std::string& key, const T& value)
+            F_err set(
+                const std::string& key,
+                const T& value)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (key == "project.info.name")
@@ -647,7 +675,9 @@ namespace fray
             }
 
             template<typename T>
-            F_err get(const std::string& key, T& value)
+            F_err get(
+                const std::string& key,
+                T& value)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (!_open || !_states.at("Fray")->isOpen())

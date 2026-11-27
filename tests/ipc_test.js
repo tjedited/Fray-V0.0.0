@@ -10,6 +10,7 @@ const { test } = require('node:test');
 const { IPCManager, TCPClient } = require('../Electron/dist-electron/ipc_manager');
 const { ThreadManager } = require('../Electron/dist-electron/thread_manager');
 const message = require('../Electron/dist-electron/message');
+const { createFrameBuilder } = require('../Electron/dist-electron/shared/frame_builder');
 const log = require('../Electron/dist-electron/log_manager');
 
 function frame(commandId, payload = Buffer.alloc(0), id = 1, destination = message.ProcessKind.PROCESS_KIND_ENGINE) {
@@ -36,6 +37,29 @@ async function waitUntil(condition, description, timeoutMs = 5000) {
 }
 
 const BROADCAST = message.ProcessKind.PROCESS_KIND_BROADCAST;
+
+test('frame builders set metadata and keep worker and main message IDs distinct', () => {
+    const sender = message.ProcessKind.PROCESS_KIND_ELECTRON_MAIN;
+    const main = createFrameBuilder(sender, 1, message.buildFrame, message.processName);
+    const worker = createFrameBuilder(sender, 2, message.buildFrame, message.processName);
+    const options = { destination: message.ProcessKind.PROCESS_KIND_ENGINE, command: message.Command.COMMAND_TEST,
+        destinationId: 7, targetProject: 'Project', ttlMs: 5000,
+        payload: Buffer.from('hello'), payloadType: message.PayloadType.PAYLOAD_TYPE_JSON };
+    const frame = message.parseFrame(main.build(options));
+    assert.equal(frame.prefix.senderKind, sender);
+    assert.equal(frame.prefix.destinationId, 7);
+    assert.equal(frame.header.messageId, '1');
+    assert.equal(frame.header.targetProject, 'Project');
+    assert.equal(frame.header.ttlMs, 5000);
+    assert.equal(frame.header.payloadType, message.PayloadType.PAYLOAD_TYPE_JSON);
+    assert.equal(frame.payload.toString(), 'hello');
+    assert.equal(message.parseFrame(worker.build(options)).header.messageId, '2');
+    assert.equal(message.parseFrame(main.build(options)).header.messageId, '3');
+    const anotherMainBuilder = createFrameBuilder(sender, 1, message.buildFrame, message.processName);
+    assert.equal(message.parseFrame(anotherMainBuilder.build(options)).header.messageId, '5');
+    assert.throws(() => main.build({ destination: 1, command: 1, payload: Buffer.from('x') }),
+        /explicit payload type/);
+});
 
 test('Electron workers receive fragmented and combined frames in order', { timeout: 10000 }, async () => {
     const server = net.createServer();
@@ -201,9 +225,8 @@ test('Engine exchanges complete frames and accepts framed quit', { timeout: 1500
         assert.deepEqual(engineFrames, []);
         client.client.write(frame(message.Command.COMMAND_READY, Buffer.alloc(0), 50));
         client.client.write(frame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), 51, BROADCAST));
-        await waitUntil(() => engineFrames.some((f) => f.prefix.commandId === message.Command.COMMAND_TEST), 'the Engine test frame');
         await waitUntil(() => engineFrames.some((f) => f.prefix.commandId === message.Command.COMMAND_READY), 'the Engine READY reply');
-        const incoming = engineFrames.find((f) => f.prefix.commandId === message.Command.COMMAND_TEST);
+        assert.equal(engineFrames.some((f) => f.prefix.commandId === message.Command.COMMAND_TEST), false);
         const reply = engineFrames.find((f) => f.prefix.commandId === message.Command.COMMAND_READY);
         assert.equal(reply.prefix.destinationKind, message.ProcessKind.PROCESS_KIND_ELECTRON_MAIN);
         assert.equal(reply.prefix.senderKind, message.ProcessKind.PROCESS_KIND_ENGINE);
@@ -277,10 +300,8 @@ test('Electron workers exchange frames with the Engine and shut down', { timeout
         await new Promise((resolve) => setTimeout(resolve, 100));
         assert.doesNotMatch(output, /message_id=78 /);
         client.send(frame(message.Command.COMMAND_READY, Buffer.alloc(0), 77));
-        await waitUntil(() => received.some((m) => m.prefix.commandId === message.Command.COMMAND_TEST), 'the Engine test frame');
-        const incoming = received.find((m) => m.prefix.commandId === message.Command.COMMAND_TEST);
-        assert.equal(incoming.header.senderName, 'Engine');
-        assert.deepEqual(JSON.parse(incoming.payload.toString()), { message: 'Hello from the Engine' });
+        await waitUntil(() => readyPeers.includes(message.ProcessKind.PROCESS_KIND_ENGINE), 'the Engine readiness reply');
+        assert.equal(received.some((m) => m.prefix.commandId === message.Command.COMMAND_TEST), false);
         // The Engine answers a newly ready neighbor with its own READY, so the held message is delivered without a request.
         await waitUntil(() => /message_id=78 .*payload_bytes=11 /.test(output), 'the queued message to reach the Engine');
         client.send(frame(message.Command.COMMAND_REQUEST_READY, Buffer.alloc(0), 80));
@@ -345,7 +366,7 @@ test('frames over the maximum size are refused when built or parsed', () => {
         length: message.MAX_FRAME_LENGTH + 1, headerLength: 1 })), /maximum/);
 });
 
-test('Electron main sends a test frame and a framed quit', { timeout: 10000 }, async () => {
+test('Electron main announces readiness and sends a framed quit', { timeout: 10000 }, async () => {
     const server = net.createServer();
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
@@ -428,28 +449,31 @@ test('Electron main sends a test frame and a framed quit', { timeout: 10000 }, a
         assert.equal(frames[0].header.senderName, 'Electron Main');
         ipcMain.emit('fray:renderer-state', { sender: win.webContents },
             { state: 'ready', threads: ['renderer-messages'] });
-        assert.equal(win.sent.length, 0, 'Main does not test the renderer until the renderer says it is ready.');
+        assert.equal(win.sent.length, 0);
         const fromRenderer = (commandId, destinationKind) => new Uint8Array(message.buildFrame({
             destinationKind, senderKind: message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER, commandId,
         }, { senderName: 'Electron Renderer', messageId: 5 }));
         ipcMain.emit('fray:frame', { sender: win.webContents },
             fromRenderer(message.Command.COMMAND_READY, BROADCAST));
-        // The renderer gets Main's test frame, plus Main's own READY in answer to the renderer's.
-        await waitUntil(() => win.sent.length === 2, 'the Main to renderer test frame');
+        // Main answers the renderer's READY without sending an application test frame.
+        await waitUntil(() => win.sent.length === 1, 'Main READY to the renderer');
         const toRenderer = win.sent.map(([, bytes]) => message.decodePrefix(Buffer.from(bytes)).commandId).sort();
-        assert.deepEqual(toRenderer, [message.Command.COMMAND_READY, message.Command.COMMAND_TEST].sort());
+        assert.deepEqual(toRenderer, [message.Command.COMMAND_READY]);
         // The renderer's broadcast reaches the Engine too, but is not echoed back to the renderer.
         await waitUntil(() => frames.some((f) => f.prefix.senderKind === message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER),
             'the renderer broadcast at the Engine');
-        assert.equal(win.sent.length, 2);
+        assert.equal(win.sent.length, 1);
         assert.equal(frames.some((f) => f.prefix.commandId === message.Command.COMMAND_TEST), false,
-            'Main does not test the Engine until the Engine says it is ready.');
+            'Main does not send startup test frames.');
         socket.write(message.buildFrame({
             destinationKind: BROADCAST,
             senderKind: message.ProcessKind.PROCESS_KIND_ENGINE,
             commandId: message.Command.COMMAND_READY,
         }, { senderName: 'Engine', messageId: 98 }));
-        await waitUntil(() => frames.some((f) => f.prefix.commandId === message.Command.COMMAND_TEST), 'the Main to Engine test frame');
+        await waitUntil(() => frames.some((f) => f.prefix.commandId === message.Command.COMMAND_READY &&
+            f.prefix.senderKind === message.ProcessKind.PROCESS_KIND_ELECTRON_MAIN &&
+            f.prefix.destinationKind === message.ProcessKind.PROCESS_KIND_ENGINE), 'Main READY to the Engine');
+        assert.equal(frames.some((f) => f.prefix.commandId === message.Command.COMMAND_TEST), false);
         const fromEngine = message.buildFrame({
             destinationKind: message.ProcessKind.PROCESS_KIND_ELECTRON_MAIN,
             senderKind: message.ProcessKind.PROCESS_KIND_ENGINE,
@@ -468,9 +492,6 @@ test('Electron main sends a test frame and a framed quit', { timeout: 10000 }, a
         ipcMain.emit('fray:renderer-state', { sender: win.webContents },
             { state: 'stopped', threads: [] });
         await complete;
-        const hello = frames.find((f) => f.prefix.commandId === message.Command.COMMAND_TEST);
-        assert.equal(hello.header.senderName, 'Electron Main');
-        assert.deepEqual(JSON.parse(hello.payload.toString()), { message: 'Hello from Electron Main' });
         assert.equal(frames.at(-1).prefix.commandId, message.Command.COMMAND_QUIT);
         assert.equal(frames.at(-1).payload.length, 0);
         await quitFinished;

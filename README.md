@@ -1,19 +1,49 @@
 # Fray V0.0.0
 A New Platform for Creatives & Developers
 
+## Engine C++ formatting
+
+Put each function parameter on its own line after the opening parenthesis.
+
 ## Engine and Electron messaging
 
-The Engine launches Electron. Each process uses its own built-in message router; Main does not register one. Electron
+The Engine launches Electron. Each process uses its own built-in message router; Main does not register one. The
+Engine router delivers application messages directly to its FrayManager. Electron
 process-specific code lives in `Electron/main/` and `Electron/renderer/`.
 Main owns a thread manager and separate network and message workers. Its message
 worker reads the prefix and forwards renderer-bound frames without decoding the
 header. Renderer-originated frames can be routed to Main or forwarded to the
 Engine. The narrow preload bridge carries frames across Electron IPC; the
 renderer has its own thread manager, message worker and router, and decodes
-headers for local messages. Main and the renderer exchange test frames on
-startup. The renderer's local handler currently logs messages; React plug-in
-dispatch is not yet implemented. Renderer console messages are forwarded to the
-terminal by Main.
+headers for local messages. Main and renderer application message handling live
+in their respective `message_handler.ts` files. React plug-in dispatch is not
+yet implemented. Renderer console messages are forwarded to the terminal by Main.
+
+### Building frames
+
+The Engine's `message::FrameBuilder` and Electron's `createFrameBuilder` accept
+the same frame options: destination, command, optional destination ID, payload,
+payload type, message type, target project and queue TTL. A nonempty payload
+requires an explicit payload type. The builders fill in sender identity,
+protocol version, message ID, timestamp and process names; `send` still accepts
+the resulting frame separately. The Engine builder returns an `F_err` and
+writes the frame to an output parameter; Electron's builder throws on invalid
+input.
+
+Electron Main and the renderer assign odd message IDs to their main/UI threads
+and even IDs to their workers. Builders in the same thread share their ID
+sequence. The Engine uses its process-wide atomic counter.
+
+### Project open requests
+
+The renderer's project message handler can send an asynchronous protobuf request
+to the Engine, which asks FrayManager to open it. A missing project is created
+in the Engine's working directory; an existing project is opened. With
+`compile-run-all.sh`, the working directory is `Engine/`. An already-open
+project, invalid name, or unresolved folder/archive or database conflict returns
+an error. The current blank UI does not expose a project-opening control.
+The existing `project.preferences.packageOnClose` setting controls packaging
+when the project closes.
 
 ### Readiness
 
@@ -73,6 +103,9 @@ time since last progress, the main/UI-thread heartbeat, and outgoing queue
 depths and oldest-message ages. Heartbeats are posted locally to the router
 once per second. Routine PING/PONG and health report logs are suppressed;
 readiness and health warnings remain visible.
+Electron disables background throttling for the window to keep the renderer's
+heartbeat running while minimized. This can increase background resource use
+and causes the page visibility API to report the page as visible.
 
 The router marks a neighbor `DEGRADED` when its health report or heartbeat has
 not advanced for three seconds, or when it reports a nonempty queue whose
@@ -141,7 +174,42 @@ built into `Electron/dist/` by `npm run build:renderer`; `npm run build` does
 both. `npm run start` builds Main first, so rerun it after editing Main code.
 `npm run typecheck` checks Main and the renderer with `tsc` (both use strict
 mode; Vite itself only strips types and does not check them). The editor
-discovers Main's settings through `Electron/main/tsconfig.json`.
+discovers Main and renderer settings through their `tsconfig.json` files.
+
+The application menu has File and Edit menus. The project commands are disabled
+placeholders; Edit uses native Undo and Redo for text editing, not project
+history. On macOS, the application menu retains Quit. The window starts
+frameless and windowed, with a draggable dark title bar above a black renderer.
+On macOS, the native window buttons remain visible. A fullscreen preference is
+not yet implemented.
+
+### Notification preview
+
+The renderer includes a temporary notification preview on startup and on
+Ctrl+Shift+N (Cmd+Shift+N on macOS). Notifications stack at the bottom right,
+with new arrivals pushing older notifications up and up to five visible.
+Dismissed notifications fade out. New arrivals wait while a notification is hovered;
+other visible notifications continue timing out. The hovered notification's
+progress bar is hidden until its timer restarts on mouse leave. Notifications
+default to four seconds, can be manually dismissed, and can specify a different
+timeout or `null` for no timeout. The copy button copies the title and optional
+description as plain text; an error is shown if copying fails.
+Notifications use an MUI icon for their type. To override it, pass a React
+element as the `icon` option to `notify`, or pass `null` to hide the icon.
+The notification component is not yet connected to process messages or logs.
+
+### Prompt preview
+
+The renderer also shows a temporary prompt preview on startup and on
+Ctrl+Shift+P (Cmd+Shift+P on macOS). Prompts are non-modal and can be dragged
+from anywhere except their buttons. Multiple requests are queued and shown
+one at a time. A prompt has a title, optional description, and caller-supplied
+buttons. The close button is enabled by default and can be disabled by the
+caller; closing reports `null`, while a choice reports its supplied value.
+Prompts are not yet connected to process messages.
+
+Material UI uses Emotion's inline styles. The renderer's content security
+policy permits inline styles but continues to restrict scripts to `'self'`.
 
 The IPC tests load the compiled Main code, so run `npm run build:main` in
 `Electron/` before them.
@@ -152,8 +220,7 @@ Run `node --test tests/ipc_test.js tests/renderer_ipc_test.js` to exercise TCP,
 Electron IPC and coordinated shutdown, including an end-to-end exchange with
 the compiled Engine. The tests use `Engine/build/Darwin/engine` by default;
 set `FRAY_TEST_ENGINE` to use another build. The renderer IPC test uses port
-5173. Its Engine uses `--no-ui --test-renderer-ipc` to enable the same Engine
-startup test frame without launching a separate UI.
+5173. Its Engine uses `--no-ui` to run without launching a separate UI.
 Run `node --test tests/outgoing_router_test.js` for the outgoing queue logic, and
 `g++ -std=c++17 -IEngine tests/outgoing_router_test.cpp -o /tmp/fray-router-test && /tmp/fray-router-test`
 for its Engine counterpart.
@@ -346,4 +413,8 @@ g++ -std=c++17 -IEngine -I/opt/homebrew/include tests/file_manager_test.cpp -L/o
 "$test_dir/file-manager-test" "$test_dir"
 g++ -std=c++17 -IEngine -I/opt/homebrew/include tests/rename_test.cpp -L/opt/homebrew/lib -lsqlite3 -lzip -pthread -o "$test_dir/rename-test"
 mkdir "$test_dir/rename" && "$test_dir/rename-test" "$test_dir/rename"
+g++ -std=c++17 -IEngine -IEngine/build/generated -I/opt/homebrew/include $(pkg-config --cflags protobuf) tests/application_dispatch_test.cpp tests/application_dispatch_link_test.cpp Engine/build/generated/fray.pb.cc -L/opt/homebrew/lib $(pkg-config --libs protobuf) -lsqlite3 -lzip -pthread -o "$test_dir/application-dispatch-test"
+mkdir "$test_dir/dispatch" && "$test_dir/application-dispatch-test" "$test_dir/dispatch"
 ```
+
+The application-dispatch test uses the protobuf files generated by the Engine build.

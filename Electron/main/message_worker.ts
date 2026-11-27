@@ -5,6 +5,7 @@ import { routeMessage, type Target } from './message_router';
 import { OutgoingRouter } from '../shared/outgoing_router';
 import { NeighborMonitor } from '../shared/neighbor_monitor';
 import { parseHealthReport } from '../shared/health';
+import { createFrameBuilder } from '../shared/frame_builder';
 import type { DecodedHeader, Prefix } from '../shared/types';
 
 const { ProcessKind, Command } = message;
@@ -13,7 +14,7 @@ const parent = parentPort!;
 const networkPort: MessagePort = workerData.port;
 let invalid = false;
 let monitorTimer: NodeJS.Timeout | undefined;
-let nextMonitorId = 2;
+const frames = createFrameBuilder(SELF, 2, message.buildFrame, message.processName);
 let heartbeat = 0;
 let processedCount = 0;
 let lastProgress = performance.now();
@@ -32,14 +33,12 @@ const outgoing = new OutgoingRouter<ArrayBuffer>((kind, bytes) => forward(kind =
     ? 'engine' : 'electron-renderer', bytes, false));
 
 function control(kind: number, commandId: number, destinationId = 0, payload: Uint8Array = new Uint8Array()): void {
-    const bytes = Uint8Array.from(message.buildFrame({ destinationKind: kind, destinationId,
-        senderKind: SELF, commandId }, { protocolVersion: 1, messageId: (nextMonitorId += 2) - 2,
-        timestamp: Date.now(), senderName: message.processName(SELF), destinationName: message.processName(kind),
+    const bytes = Uint8Array.from(frames.build({ destination: kind, destinationId, command: commandId, payload,
         payloadType: commandId === Command.COMMAND_PONG
             ? message.PayloadType.PAYLOAD_TYPE_PROTOBUF : message.PayloadType.PAYLOAD_TYPE_NONE,
         messageType: commandId === Command.COMMAND_PONG
             ? message.MessageType.MESSAGE_TYPE_HEALTH_REPORT : message.MessageType.MESSAGE_TYPE_NONE,
-    }, payload));
+    }));
     routeFrame(bytes.buffer, 'local');
 }
 

@@ -32,17 +32,24 @@ namespace fray::routing
             std::vector<QueueHealth> queues;
         };
 
-        NeighborMonitor(Send send, State state, Changed changed, Now now = [] { return Clock::now(); })
+        NeighborMonitor(
+            Send send,
+            State state,
+            Changed changed,
+            Now now = [] { return Clock::now(); })
             : _send(std::move(send)), _state(std::move(state)), _changed(std::move(changed)), _now(std::move(now)) {}
 
-        void start(Key neighbor)
+        void start(
+            Key neighbor)
         {
             const auto now = _now();
             _neighbors[neighbor] = {now, now, std::nullopt, std::nullopt, now, now, now};
             setState(neighbor, NeighborState::probing);
         }
 
-        void observe(Key neighbor, bool ready)
+        void observe(
+            Key neighbor,
+            bool ready)
         {
             auto found = _neighbors.find(neighbor);
             if (found == _neighbors.end()) return;
@@ -55,7 +62,9 @@ namespace fray::routing
                 setState(neighbor, isDegraded(entry, entry.lastHeard) ? NeighborState::degraded : NeighborState::ready);
         }
 
-        void report(Key neighbor, HealthReport health)
+        void report(
+            Key neighbor,
+            HealthReport health)
         {
             const auto found = _neighbors.find(neighbor);
             if (found == _neighbors.end()) return;
@@ -107,12 +116,15 @@ namespace fray::routing
             Clock::time_point heartbeatChanged;
             Clock::time_point queueProgress;
         };
-        static bool hasQueue(const HealthReport &health)
+        static bool hasQueue(
+            const HealthReport &health)
         {
             for (const auto &queue : health.queues) if (queue.depth != 0) return true;
             return false;
         }
-        static bool isDegraded(const Neighbor &entry, Clock::time_point now)
+        static bool isDegraded(
+            const Neighbor &entry,
+            Clock::time_point now)
         {
             using namespace std::chrono_literals;
             if (!entry.health)
@@ -120,7 +132,9 @@ namespace fray::routing
             return now - entry.healthReceived >= 3s || now - entry.heartbeatChanged >= 3s ||
                 (hasQueue(*entry.health) && now - entry.queueProgress >= 3s);
         }
-        void setState(Key neighbor, NeighborState state)
+        void setState(
+            Key neighbor,
+            NeighborState state)
         {
             if (_state(neighbor) != state) _changed(neighbor, state);
         }
