@@ -24,6 +24,7 @@ export interface IPCManagerEvents {
     'renderer-frame': [ArrayBuffer, boolean];
     /** A neighbor became ready, as seen by the router thread. */
     'peer-ready': [number];
+    'peer-unavailable': [number];
 }
 
 /**
@@ -221,6 +222,8 @@ export class IPCManager extends EventEmitter<IPCManagerEvents> {
                 }
             } else if (event.type === 'peer-ready') {
                 this.emit('peer-ready', event.kind!);
+            } else if (event.type === 'peer-unavailable') {
+                this.emit('peer-unavailable', event.kind!);
             } else if (event.type === 'log') {
                 if (event.level === 'warn') log.electronWarn('Message thread: %s', event.message);
                 else log.electronInfo('Message thread: %s', event.message);

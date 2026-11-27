@@ -49,6 +49,8 @@ namespace fray
     namespace files
     {
         enum class ConflictChoice { Ask, Archive, Folder };
+        enum class OpenMode { OpenOrCreate, CreateNew, OpenExisting, OpenSelected, CreateInFolder,
+                              CreateInFolderResolve };
 
         class FileManager
         {
@@ -71,6 +73,10 @@ namespace fray
                 };
                 ProjectLock _lock;
                 ProjectLock _extraLock;
+                std::filesystem::path _conflictSource;
+                std::filesystem::path _conflictDestination;
+                std::string _conflictName;
+                bool _conflictFolder = false;
                 unsigned _users = 0;
                 std::shared_ptr<int> _lifetime = std::make_shared<int>(0);
 
@@ -208,6 +214,48 @@ namespace fray
                     _name.clear();
                     _archiveExists = false;
                     _extracted = false;
+                    _conflictSource.clear();
+                    _conflictDestination.clear();
+                    _conflictName.clear();
+                    return true;
+                }
+
+                bool rollbackConflict()
+                {
+                    if (_conflictSource.empty())
+                        return true;
+                    const bool databaseRestored = _conflictFolder
+                        ? renameFolderDatabase(_conflictDestination, _conflictName, _name)
+                        : renameArchiveDatabase(_conflictDestination, _conflictName, _name);
+                    if (!databaseRestored)
+                    {
+                        fray::log::engineError("Cannot restore the unselected project's database name.");
+                        return false;
+                    }
+                    if (!renameExclusive(_conflictDestination, _conflictSource))
+                    {
+                        const bool reverted = _conflictFolder
+                            ? renameFolderDatabase(_conflictDestination, _name, _conflictName)
+                            : renameArchiveDatabase(_conflictDestination, _name, _conflictName);
+                        if (!reverted)
+                            fray::log::engineError("Cannot restore the renamed project's database name.");
+                        fray::log::engineError("Cannot restore the unselected project to %s.",
+                                               _conflictSource.string().c_str());
+                        return false;
+                    }
+                    _conflictSource.clear();
+                    _conflictDestination.clear();
+                    _conflictName.clear();
+                    return true;
+                }
+
+                bool commitConflict()
+                {
+                    if (!unlockProject(_extraLock))
+                        return false;
+                    _conflictSource.clear();
+                    _conflictDestination.clear();
+                    _conflictName.clear();
                     return true;
                 }
 
@@ -622,7 +670,9 @@ namespace fray
 
                 F_err open(
                     const std::string& path,
-                    ConflictChoice choice = ConflictChoice::Ask)
+                    ConflictChoice choice = ConflictChoice::Ask,
+                    OpenMode mode = OpenMode::OpenOrCreate,
+                    bool deferConflictCommit = false)
                 {
                     if (isOpen() || !_lock.path.empty() || !_extraLock.path.empty() ||
                         path.empty() || path.find('\0') != std::string::npos)
@@ -676,7 +726,9 @@ namespace fray
                         reset();
                         return fray::errors::FAILED_OPEN_PROJECT;
                     }
-                    if (hasArchive && hasFolder && choice == ConflictChoice::Ask)
+                    if (hasArchive && hasFolder &&
+                        ((choice == ConflictChoice::Ask && mode != OpenMode::CreateNew) ||
+                         mode == OpenMode::OpenSelected || mode == OpenMode::CreateInFolder))
                     {
                         reset();
                         return fray::errors::PROJECT_CONFLICT;
@@ -695,7 +747,29 @@ namespace fray
                         reset();
                         return fray::errors::FAILED_OPEN_PROJECT;
                     }
-                    if (hasArchive && hasFolder && choice == ConflictChoice::Ask)
+                    if (mode == OpenMode::CreateNew && (hasArchive || hasFolder))
+                    {
+                        const F_err result = hasArchive && hasFolder ? errors::PROJECT_BOTH_EXIST :
+                            hasArchive ? errors::PROJECT_ARCHIVE_EXISTS : errors::PROJECT_FOLDER_EXISTS;
+                        reset();
+                        return result;
+                    }
+                    if ((mode == OpenMode::OpenExisting || mode == OpenMode::OpenSelected) &&
+                        ((!hasFolder && !hasArchive) ||
+                         (choice == ConflictChoice::Archive && !hasArchive) ||
+                         (choice == ConflictChoice::Folder && !hasFolder)))
+                    {
+                        reset();
+                        return errors::PROJECT_NOT_FOUND;
+                    }
+                    if ((mode == OpenMode::CreateInFolder || mode == OpenMode::CreateInFolderResolve) && !hasFolder)
+                    {
+                        reset();
+                        return errors::PROJECT_NOT_FOUND;
+                    }
+                    if (hasArchive && hasFolder &&
+                        (choice == ConflictChoice::Ask || mode == OpenMode::OpenSelected ||
+                         mode == OpenMode::CreateInFolder))
                     {
                         reset();
                         return fray::errors::PROJECT_CONFLICT;
@@ -738,8 +812,13 @@ namespace fray
                         }
                         fray::log::engineInfo("Renamed %s to %s", source.string().c_str(),
                                               destination.string().c_str());
-                        if (!unlockProject(_extraLock))
+                        _conflictSource = source;
+                        _conflictDestination = destination;
+                        _conflictName = newName;
+                        _conflictFolder = useArchive;
+                        if (!deferConflictCommit && !commitConflict())
                         {
+                            rollbackConflict();
                             reset();
                             return fray::errors::FAILED_OPEN_PROJECT;
                         }
@@ -752,6 +831,7 @@ namespace fray
                     {
                         if (!extract())
                         {
+                            rollbackConflict();
                             reset();
                             return fray::errors::FAILED_OPEN_PROJECT;
                         }

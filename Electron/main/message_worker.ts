@@ -61,7 +61,10 @@ const monitor = new NeighborMonitor(
             if (outgoing.markReady(kind)) parent.postMessage({ type: 'peer-ready', kind });
         } else {
             outgoing.setState(kind, state);
-            if (state === 'down' || state === 'unreachable') outgoing.discardQueue(kind);
+            if (state === 'down' || state === 'unreachable') {
+                outgoing.discardQueue(kind);
+                parent.postMessage({ type: 'peer-unavailable', kind });
+            }
             if (state !== 'probing') log('warn', `${message.processName(kind)} is ${state.toUpperCase()}.`);
         }
     },

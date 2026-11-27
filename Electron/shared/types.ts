@@ -64,6 +64,8 @@ export interface IncomingMessage<TPayload> {
 /** The lifecycle states the renderer reports to Electron Main. */
 export type RendererState = 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed';
 
+export type ProjectSelection = { path: string; kind: 'archive' | 'folder' };
+
 /** The API the preload script exposes to the renderer as `window.frayBridge`. */
 export interface FrayBridge {
   sendFrame(frame: Uint8Array): void;
@@ -72,4 +74,9 @@ export interface FrayBridge {
   onFrame(handler: (frame: Uint8Array) => void): () => void;
   /** Returns a function that removes the handler. */
   onShutdown(handler: () => void): () => void;
+  onNewProject(handler: () => void): () => void;
+  chooseNewProjectPath(previousPath?: string): Promise<string | null>;
+  onOpenProject(handler: () => void): () => void;
+  chooseOpenProjectPath(kind: 'archive' | 'folder' | 'both'): Promise<ProjectSelection | null>;
+  onCloseProject(handler: (packageProject: boolean) => void): () => void;
 }

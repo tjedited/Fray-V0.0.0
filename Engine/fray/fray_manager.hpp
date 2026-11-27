@@ -2,6 +2,7 @@
 #define FRAY_MANAGER_HPP
 
 #include <atomic>
+#include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -10,10 +11,12 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "project_manager.hpp"
 #include "thread_manager.hpp"
+#include "fray.pb.h"
 
 namespace fray
 {
@@ -42,6 +45,16 @@ namespace fray
             bool _shutdown = false;
             std::mutex _mutex;
             std::unordered_map<std::string, Entry> _projects;
+            std::vector<ProjectManager*> _openOrder;
+            std::unordered_set<ProjectManager*> _closingProjects;
+            struct PendingPrompt
+            {
+                PromptRequest request;
+                std::function<void(const PromptResponse&)> callback;
+            };
+            std::mutex _promptMutex;
+            std::unordered_map<uint64_t, PendingPrompt> _pendingPrompts;
+            bool _promptClosing = false;
 
             static std::future<F_err> ready(
                 F_err result)
@@ -82,6 +95,20 @@ namespace fray
             {
                 entry.queue->shutdown();
                 _threads->join(entry.thread);
+            }
+
+            void forgetProject(
+                ProjectManager* project)
+            {
+                _openOrder.erase(std::remove(_openOrder.begin(), _openOrder.end(), project), _openOrder.end());
+            }
+
+            void recordOpen(
+                ProjectManager* project)
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                forgetProject(project);
+                _openOrder.push_back(project);
             }
 
             void rekey(
@@ -148,6 +175,7 @@ namespace fray
             {
                 if (_shutdown)
                     return;
+                cancelPrompts("Application is shutting down.", true);
                 _applicationQueue->shutdown();
                 _threads->join(_applicationThread);
                 _shutdown = true;
@@ -155,7 +183,7 @@ namespace fray
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
                     for (auto& entry : _projects)
-                        if (entry.second.project->isOpening())
+                        if (entry.second.project->isOpening() || _closingProjects.count(entry.second.project.get()))
                             openings.push_back(entry.second.queue->call([] {}));
                 }
                 for (auto& opening : openings)
@@ -174,6 +202,31 @@ namespace fray
                 for (auto& entry : _projects)
                     _threads->join(entry.second.thread);
                 _projects.clear();
+                _openOrder.clear();
+                _closingProjects.clear();
+            }
+
+            void cancelPrompts(
+                const std::string& reason,
+                bool closing = false)
+            {
+                std::unordered_map<uint64_t, PendingPrompt> prompts;
+                {
+                    std::lock_guard<std::mutex> lock(_promptMutex);
+                    if (closing)
+                        _promptClosing = true;
+                    prompts.swap(_pendingPrompts);
+                }
+                for (auto& entry : prompts)
+                {
+                    PromptResponse response;
+                    response.set_request_id(entry.first);
+                    response.set_dismissed(true);
+                    response.set_error(reason);
+                    if (!_applicationQueue->post([callback = std::move(entry.second.callback), response]
+                        { callback(response); }))
+                        log::engineError("Cannot report prompt cancellation: application thread is shutting down.");
+                }
             }
 
             const std::string& applicationId() const { return _applicationId; }
@@ -187,6 +240,11 @@ namespace fray
                 const message::InData& incoming,
                 ipc::IPCManager& ipc);
 
+            bool requestPrompt(
+                ipc::IPCManager& ipc,
+                const PromptRequest& request,
+                std::function<void(const PromptResponse&)> callback);
+
             // Starts opening a project on its own thread. The optional completion runs on that thread,
             // or on the caller for an immediate failure. Conflict cancellation is opt-in for callers
             // that cannot resolve a pending database choice.
@@ -194,7 +252,8 @@ namespace fray
                 const std::string& path,
                 files::ConflictChoice choice = files::ConflictChoice::Ask,
                 std::function<void(F_err)> completion = {},
-                bool cancelOnDatabaseConflict = false)
+                bool cancelOnDatabaseConflict = false,
+                files::OpenMode mode = files::OpenMode::OpenOrCreate)
             {
                 if (_shutdown)
                 {
@@ -231,6 +290,7 @@ namespace fray
                             alreadyOpen = true;
                         else
                         {
+                            forgetProject(found->second.project.get());
                             stale = std::move(found->second);
                             _projects.erase(found);
                         }
@@ -261,9 +321,11 @@ namespace fray
                     _projects.emplace(name, std::move(entry));
                 }
                 return queue->call([this, project, queue, path, choice, completion = std::move(completion),
-                                    cancelOnDatabaseConflict]
+                                    cancelOnDatabaseConflict, mode]
                 {
-                    const F_err result = project->open(path, _applicationId, choice, _threads, queue);
+                    const F_err result = project->open(path, _applicationId, choice, _threads, queue, mode);
+                    if (result == errors::NONE)
+                        recordOpen(project);
                     if (result == errors::DATABASE_CONFLICT && cancelOnDatabaseConflict)
                     {
                         if (project->cancelOpen() != errors::NONE)
@@ -299,6 +361,8 @@ namespace fray
                 ProjectManager* project = entry->project.get();
                 const F_err result = callOnThread(*entry, [project, choice] { return project->resolveDatabase(choice); },
                                                   errors::FAILED_OPEN_PROJECT);
+                if (result == errors::NONE)
+                    recordOpen(project);
                 if (result != errors::NONE && !project->isOpen() && project->databaseCandidates().empty())
                     entry->queue->shutdown();
                 return result;
@@ -322,6 +386,7 @@ namespace fray
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
                     const auto found = _projects.find(name);
+                    forgetProject(found->second.project.get());
                     removed = std::move(found->second);
                     _projects.erase(found);
                 }
@@ -337,6 +402,70 @@ namespace fray
                 if (found == _projects.end() || !found->second.project->isOpen())
                     throw std::out_of_range("Project is not open: " + name);
                 return *found->second.project;
+            }
+
+            // An empty target selects the most recently opened project. Completion runs on the project thread.
+            void requestCloseProject(
+                const std::string& target,
+                bool package,
+                std::function<void(const std::string&, F_err, bool)> completion)
+            {
+                std::unique_lock<std::mutex> lock(_mutex);
+                _openOrder.erase(std::remove_if(_openOrder.begin(), _openOrder.end(),
+                    [](ProjectManager* project) { return !project->isOpen(); }), _openOrder.end());
+                ProjectManager* project = nullptr;
+                std::shared_ptr<threads::TaskQueue> queue;
+                if (target.empty())
+                {
+                    if (!_openOrder.empty())
+                        project = _openOrder.back();
+                }
+                else
+                {
+                    const auto found = _projects.find(target);
+                    if (found != _projects.end() && found->second.project->isOpen())
+                        project = found->second.project.get();
+                }
+                if (project)
+                    for (auto& entry : _projects)
+                        if (entry.second.project.get() == project)
+                            queue = entry.second.queue;
+                if (!project || !queue)
+                {
+                    log::engineError("Cannot close project: no matching project is open.");
+                    lock.unlock();
+                    completion(target, errors::PROJECT_NOT_FOUND, false);
+                    return;
+                }
+                if (!_closingProjects.insert(project).second)
+                {
+                    log::engineError("Cannot close project: it is already closing.");
+                    lock.unlock();
+                    completion(target, errors::FAILED_CLOSE_PROJECT, false);
+                    return;
+                }
+                if (!queue->post([this, project, queue, package, completion]
+                {
+                    const std::string name = project->name();
+                    bool packaged = false;
+                    const F_err result = project->close(package, &packaged);
+                    {
+                        std::lock_guard<std::mutex> lock(_mutex);
+                        _closingProjects.erase(project);
+                        if (result == errors::NONE)
+                        {
+                            forgetProject(project);
+                            queue->shutdown();
+                        }
+                    }
+                    completion(name, result, packaged);
+                }))
+                {
+                    _closingProjects.erase(project);
+                    log::engineError("Cannot close project: its queue is stopped.");
+                    lock.unlock();
+                    completion(target, errors::FAILED_CLOSE_PROJECT, false);
+                }
             }
 
             F_err closeProject(
@@ -360,6 +489,7 @@ namespace fray
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
                     const auto found = _projects.find(name);
+                    forgetProject(found->second.project.get());
                     removed = std::move(found->second);
                     _projects.erase(found);
                 }

@@ -73,6 +73,7 @@ int main(int argc, char** argv)
             fray::FrayManager app;
             assert(app.openProject(first.string()).get() == fray::errors::NONE);
             assert(app.project("Alpha").set("marker", "alpha") == fray::errors::NONE);
+            assert(app.project("Alpha").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
             assert(app.closeProject("Alpha") == fray::errors::NONE);
         }
         fs::rename(first, root / "Beta.fry");
@@ -167,6 +168,7 @@ int main(int argc, char** argv)
             fray::FrayManager app;
             assert(app.openProject(source.string()).get() == fray::errors::DATABASE_CONFLICT);
             assert(app.resolveDatabase("Packed", fray::DatabaseChoice::use("one")) == fray::errors::NONE);
+            assert(app.project("Packed").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
             assert(app.closeProject("Packed") == fray::errors::NONE);
         }
         assert(fs::exists(root / "Packed.fry") && !fs::exists(source));
@@ -195,6 +197,7 @@ int main(int argc, char** argv)
         fray::FrayManager app;
         assert(app.openProject(folder.string()).get() == fray::errors::NONE);
         auto& project = app.project("Live");
+        assert(project.set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         assert(project.set("marker", "live") == fray::errors::NONE);
         assert(project.openState("extra") == fray::errors::NONE);
         assert(project.state("extra").set("answer", 42) == fray::errors::NONE);
@@ -226,6 +229,7 @@ int main(int argc, char** argv)
         fray::FrayManager app;
         assert(app.openProject(folder.string()).get() == fray::errors::NONE);
         assert(app.project("Watched").set("marker", "watched") == fray::errors::NONE);
+        assert(app.project("Watched").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         fs::rename(folder, root / "Renamed");
         assert(waitFor([&] { return projectIsOpen(app, "Renamed"); }));
         auto& project = app.project("Renamed");
@@ -258,6 +262,7 @@ int main(int argc, char** argv)
         const fs::path folder = root / "Locked";
         fray::FrayManager app;
         assert(app.openProject(folder.string()).get() == fray::errors::NONE);
+        assert(app.project("Locked").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         assert(fs::exists(root / "Locked.lock"));
         fs::rename(root / "Locked.lock", root / "Stray.lock");
         assert(waitFor([&] { return fs::exists(root / "Locked.lock"); }));
@@ -278,6 +283,7 @@ int main(int argc, char** argv)
             fray::FrayManager app;
             assert(app.openProject(archive.string()).get() == fray::errors::NONE);
             auto& project = app.project("Snap");
+            assert(project.set("project.preferences.packageOnClose", true) == fray::errors::NONE);
             assert(project.set("marker", round) == fray::errors::NONE);
             if (round > 0)
             {
@@ -306,6 +312,7 @@ int main(int argc, char** argv)
             const fs::path folder = root / "FolderSnap";
             fray::FrayManager app;
             assert(app.openProject(folder.string()).get() == fray::errors::NONE);
+            assert(app.project("FolderSnap").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
             assert(app.closeProject("FolderSnap") == fray::errors::NONE);
             assert(fs::exists(root / "FolderSnap.fry"));
             assert(app.openProject((root / "FolderSnap.fry").string()).get() == fray::errors::NONE);
@@ -365,7 +372,7 @@ int main(int argc, char** argv)
             assert(app.project(name).isOpen());
         assert(app.openProject((root / "P2").string()).get() == fray::errors::PROJECT_ALREADY_OPEN);
         assert(app.close() == fray::errors::NONE);
-        assert(fs::exists(root / "P1.fry") && fs::exists(root / "P3.fry"));
+        assert(fs::is_regular_file(root / "P1" / "P1.sqlite") && fs::is_regular_file(root / "P3" / "P3.sqlite"));
     }
 
     // FileWatcher on its own.

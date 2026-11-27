@@ -54,8 +54,8 @@ int main(int argc, char** argv)
     assert(shuttingDown.wait_for(10s) == std::future_status::ready);
     shuttingDown.get();
 
-    assert(fs::is_regular_file("Pending.fry"));
-    assert(!fs::exists("Pending"));
+    assert(!fs::exists("Pending.fry"));
+    assert(fs::is_regular_file("Pending/Pending.sqlite"));
     assert(!fs::exists("Pending.lock"));
     assert(threads.runningNames().empty());
     assert(app.openProject("AfterShutdown.fry").get() == fray::errors::FAILED_OPEN_PROJECT);

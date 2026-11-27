@@ -1,6 +1,7 @@
 /* main.js */
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import * as path from 'node:path';
+import { lstat } from 'node:fs/promises';
 import * as log from './log_manager';
 import { IPCManager } from './ipc_manager';
 import { ThreadManager } from './thread_manager';
@@ -41,7 +42,12 @@ function send(frame: Buffer): void {
   }
 }
 
-const messages = createMessageHandler(frames, send, () => ipc?.connected === true);
+const messages = createMessageHandler(frames, send, () => ipc?.connected === true && !shuttingDown, (frame) => {
+  if (!ipc || shuttingDown || !ipc.connected) throw new Error('Cannot send prompt: IPC is not available.');
+  ipc.send(frame);
+});
+
+export const requestPrompt = messages.requestPrompt;
 
 function connectToEngine(): void {
   if (!enginePort) {
@@ -58,6 +64,11 @@ function connectToEngine(): void {
   // A neighbor that has just become ready is answered with our own READY, so it need not ask. Only a change triggers
   // this, so the exchange ends after one reply each way. Until connected, Main is not ready and announces on connect.
   ipc.on('peer-ready', messages.onPeerReady);
+  ipc.on('disconnected', () => messages.cancelPrompts('Engine connection was lost.'));
+  ipc.on('peer-unavailable', (kind) => {
+    if (kind === ProcessKind.PROCESS_KIND_ELECTRON_RENDERER)
+      messages.cancelPrompts('Renderer is unavailable.');
+  });
   ipc.on('message', messages.onMessage);
   ipc.on('renderer-frame', (frame, broadcast) => sendToRenderer(frame, broadcast));
 }
@@ -98,6 +109,45 @@ ipcMain.on('fray:frame', (event, frame: unknown) => {
   } catch (error) {
     log.electronError('Cannot route renderer frame: %s', (error as Error).message);
   }
+});
+
+ipcMain.handle('fray:choose-new-project-path', async (event, previousPath: unknown) => {
+  if (!window || window.isDestroyed() || event.sender !== window.webContents || shuttingDown)
+    throw new Error('Cannot choose a project path from this renderer.');
+  if (previousPath !== undefined &&
+      (typeof previousPath !== 'string' || !path.isAbsolute(previousPath) || previousPath.includes('\0')))
+    throw new Error('Cannot choose a project path: invalid previous path.');
+  const result = await dialog.showSaveDialog(window, {
+    title: 'New Project',
+    buttonLabel: 'Create Project',
+    defaultPath: previousPath === undefined ? undefined : path.dirname(previousPath),
+  });
+  if (result.canceled || !result.filePath) return null;
+  return result.filePath.endsWith('.fry') ? result.filePath.slice(0, -4) : result.filePath;
+});
+
+ipcMain.handle('fray:choose-open-project-path', async (event, kind: unknown) => {
+  if (!window || window.isDestroyed() || event.sender !== window.webContents || shuttingDown)
+    throw new Error('Cannot choose a project from this renderer.');
+  if (kind !== 'archive' && kind !== 'folder' && !(kind === 'both' && process.platform === 'darwin'))
+    throw new Error('Cannot choose a project: invalid picker type.');
+  const properties: ('openFile' | 'openDirectory')[] = kind === 'both'
+    ? ['openFile', 'openDirectory'] : [kind === 'archive' ? 'openFile' : 'openDirectory'];
+  const result = await dialog.showOpenDialog(window, {
+    title: 'Open Project',
+    properties,
+    ...(kind === 'folder' ? {} : { filters: [{ name: 'Fray projects', extensions: ['fry'] }] }),
+  });
+  if (result.canceled) return null;
+  const selected = result.filePaths[0];
+  if (!selected || !path.isAbsolute(selected) || selected.includes('\0'))
+    throw new Error('The selected project path is invalid.');
+  const status = await lstat(selected);
+  if (status.isDirectory() && kind !== 'archive')
+    return { path: selected, kind: 'folder' };
+  if (status.isFile() && kind !== 'folder' && path.extname(selected) === '.fry')
+    return { path: selected.slice(0, -4), kind: 'archive' };
+  throw new Error('Select a working folder or a .fry project archive.');
 });
 
 ipcMain.on('fray:renderer-state', (event, report: { state: RendererState; threads: string[] } | null) => {
@@ -161,6 +211,7 @@ const createWindow = (): void => {
     }
   });
   win.webContents.on('render-process-gone', (_event, details) => {
+    messages.cancelPrompts('Renderer process exited.');
     log.electronError('Renderer process exited (%s); its threads could not report a clean shutdown.', details.reason);
     rendererState = 'gone';
     ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
@@ -168,6 +219,7 @@ const createWindow = (): void => {
   });
   win.webContents.on('did-start-navigation', (_event, _url, isSameDocument, isMainFrame) => {
     if (!isMainFrame || isSameDocument) return;
+    messages.cancelPrompts('Renderer navigated.');
     if (rendererState !== 'starting' && rendererState !== 'stopped' && rendererState !== 'gone')
       log.electronWarn('Renderer navigated without a coordinated worker shutdown.');
     rendererState = 'starting';
@@ -201,6 +253,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (shuttingDown) return;
   shuttingDown = true;
+  messages.cancelPrompts();
   if (!window) resolveRendererStopped();
   if (rendererState === 'failed' && rendererThreads.length === 0) {
     log.electronError('Renderer threads stopped after a failure; shutdown was not clean.');
@@ -228,11 +281,35 @@ app.whenReady().then(() => {
     {
       label: 'File',
       submenu: [
-        { label: 'New Project', enabled: false },
-        { label: 'Open Project', enabled: false },
+        { label: 'New Project', click: () => {
+          if (!window || window.isDestroyed() || rendererState !== 'ready' || shuttingDown) {
+            log.electronWarn('Cannot create project: renderer is not ready.');
+            return;
+          }
+          window.webContents.send('fray:new-project');
+        } },
+        { label: 'Open Project', click: () => {
+          if (!window || window.isDestroyed() || rendererState !== 'ready' || shuttingDown) {
+            log.electronWarn('Cannot open project: renderer is not ready.');
+            return;
+          }
+          window.webContents.send('fray:open-project');
+        } },
         { label: 'Project Preferences', enabled: false },
-        { label: 'Close Project', enabled: false },
-        { label: 'Package Project', enabled: false }
+        { label: 'Close Project', click: () => {
+          if (!window || window.isDestroyed() || rendererState !== 'ready' || shuttingDown) {
+            log.electronWarn('Cannot close project: renderer is not ready.');
+            return;
+          }
+          window.webContents.send('fray:close-project', false);
+        } },
+        { label: 'Package Project', click: () => {
+          if (!window || window.isDestroyed() || rendererState !== 'ready' || shuttingDown) {
+            log.electronWarn('Cannot package project: renderer is not ready.');
+            return;
+          }
+          window.webContents.send('fray:close-project', true);
+        } }
       ]
     },
     {

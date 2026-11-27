@@ -96,6 +96,7 @@ int main(int argc, char** argv)
         assert(competingProject.open(folder.string()) == fray::errors::FAILED_OPEN_PROJECT);
         assert(app.openProject(archive.string()).get() == fray::errors::PROJECT_ALREADY_OPEN);
         auto& project = app.project("TestProject");
+        assert(project.set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         assert(project.name() == "TestProject");
         assert(project.applicationId() == "ExampleApplication");
         assert(fs::is_directory(folder) && fs::is_regular_file(database));
@@ -120,11 +121,13 @@ int main(int argc, char** argv)
         assert(project.fileManager().filePath("../outside", asset) == fray::errors::FAILED_OPEN_PROJECT);
 
         assert(app.openProject(other.string()).get() == fray::errors::NONE);
+        assert(app.project("OtherProject").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         assert(app.project("OtherProject").set("project.version.major", 7) == fray::errors::NONE);
         const fs::path trailing = root / "Trailing";
         assert(fs::create_directory(trailing));
         assert(app.openProject(trailing.string() + "/").get() == fray::errors::NONE);
         assert(app.project("Trailing").name() == "Trailing");
+        assert(app.project("Trailing").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         assert(app.closeProject("Trailing") == fray::errors::NONE);
         int version = -1;
         assert(project.get("project.version.major", version) == fray::errors::NONE && version == 0);
@@ -468,6 +471,7 @@ int main(int argc, char** argv)
         fray::FrayManager app;
         assert(app.openProject(missing.string()).get() == fray::errors::NONE);
         auto& project = app.project("Missing");
+        assert(project.set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         assert(fs::exists(root / "Missing" / "Missing.sqlite"));
         assert(readFile(root / "Missing" / "asset.txt") == "keep");
         assert(project.close() == fray::errors::NONE);
@@ -507,6 +511,7 @@ int main(int argc, char** argv)
         fray::FrayManager app;
         assert(app.openProject(race.string()).get() == fray::errors::NONE);
         auto& project = app.project("Race");
+        assert(project.set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         createArchive(race, "external.txt", "keep");
         const std::string external = readFile(race);
         assert(project.close() == fray::errors::FAILED_SAVE_PROJECT);
@@ -525,6 +530,7 @@ int main(int argc, char** argv)
         {
             fray::FrayManager app;
             assert(app.openProject(protectedFolder.string()).get() == fray::errors::NONE);
+            assert(app.project("Protected").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
             assert(app.project("Protected").close() == fray::errors::FAILED_CLOSE_PROJECT);
             assert(fs::exists(root / "Protected.fry") && fs::is_directory(protectedFolder));
         }
@@ -536,6 +542,7 @@ int main(int argc, char** argv)
         writeFile(repository / ".git" / "config", "keep");
         fray::FrayManager app;
         assert(app.openProject(repository.string()).get() == fray::errors::NONE);
+        assert(app.project("Repository").set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         assert(app.project("Repository").close() == fray::errors::NONE);
         assert(!fs::exists(repository));
         assert(archiveHas(root / "Repository.fry", ".git/config"));
@@ -547,6 +554,7 @@ int main(int argc, char** argv)
         fray::FrayManager app;
         assert(app.openProject(linkProject.string()).get() == fray::errors::NONE);
         auto& project = app.project("LinkProject");
+        assert(project.set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         const fs::path link = project.fileManager().workingDirectory() / "link";
         fs::create_symlink(root / "outside", link);
         assert(project.close() == fray::errors::FAILED_SAVE_PROJECT);
@@ -564,6 +572,7 @@ int main(int argc, char** argv)
         fray::FrayManager app;
         assert(app.openProject(cleanup.string()).get() == fray::errors::NONE);
         auto& project = app.project("Cleanup");
+        assert(project.set("project.preferences.packageOnClose", true) == fray::errors::NONE);
         assert(project.set("value", 42) == fray::errors::NONE);
         fs::permissions(workspace, fs::perms::owner_read | fs::perms::owner_exec);
         assert(project.close() == fray::errors::FAILED_CLOSE_PROJECT);
@@ -586,7 +595,7 @@ int main(int argc, char** argv)
         assert(app.openProject(automatic.string()).get() == fray::errors::NONE);
         assert(app.project("Automatic").set("value", 42) == fray::errors::NONE);
     }
-    assert(fs::exists(root / "Automatic.fry"));
-    assert(!fs::exists(root / "Automatic"));
+    assert(!fs::exists(root / "Automatic.fry"));
+    assert(fs::is_regular_file(root / "Automatic" / "Automatic.sqlite"));
     assert(!fs::exists(root / "Automatic.lock"));
 }

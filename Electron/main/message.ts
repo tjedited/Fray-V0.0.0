@@ -15,6 +15,8 @@ export const MAX_FRAME_LENGTH = 16 * 1024 * 1024;
 const root = protobuf.loadSync(path.join(__dirname, '..', '..', 'Schemas', 'fray.proto'));
 const Header = root.lookupType('fray.Header');
 export const HealthReport = root.lookupType('fray.HealthReport');
+export const PromptRequest = root.lookupType('fray.PromptRequest');
+export const PromptResponse = root.lookupType('fray.PromptResponse');
 
 // Enum name -> number objects, generated from the same schema as the engine.
 export const ProcessKind = root.lookupEnum('fray.ProcessKind').values;

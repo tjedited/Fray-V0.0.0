@@ -204,6 +204,8 @@ class IPCManager extends node_events.EventEmitter {
         }
       } else if (event.type === "peer-ready") {
         this.emit("peer-ready", event.kind);
+      } else if (event.type === "peer-unavailable") {
+        this.emit("peer-unavailable", event.kind);
       } else if (event.type === "log") {
         if (event.level === "warn") log_manager.electronWarn("Message thread: %s", event.message);
         else log_manager.electronInfo("Message thread: %s", event.message);

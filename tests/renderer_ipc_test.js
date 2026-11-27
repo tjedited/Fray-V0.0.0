@@ -7,7 +7,35 @@ const { test } = require('node:test');
 const { pathToFileURL } = require('node:url');
 const fs = require('node:fs/promises');
 const os = require('node:os');
+const { crc32 } = require('node:zlib');
 const message = require('../Electron/dist-electron/message');
+
+function storedZip(name, content) {
+    const filename = Buffer.from(name);
+    const crc = crc32(content);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(content.length, 18);
+    local.writeUInt32LE(content.length, 22);
+    local.writeUInt16LE(filename.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(content.length, 20);
+    central.writeUInt32LE(content.length, 24);
+    central.writeUInt16LE(filename.length, 28);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(1, 8);
+    end.writeUInt16LE(1, 10);
+    end.writeUInt32LE(central.length + filename.length, 12);
+    end.writeUInt32LE(local.length + filename.length + content.length, 16);
+    return Buffer.concat([local, filename, content, central, filename, end]);
+}
 
 // Requests the renderer entry so Vite finishes optimizing dependencies before Electron loads the page.
 // Otherwise a cold cache makes Vite reload the page just after it starts.
@@ -83,18 +111,11 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
         await Promise.race([waitFor('sender=Electron Renderer'), failOnExit]);
         await Promise.race([waitFor(':SHOWN_END'), failOnExit]);
         assert.match(output, /SHOWN:1:SHOWN_END/);
-        child.stdin.write('preview-test\n');
-        await Promise.race([waitFor(':PREVIEW_END'), failOnExit]);
-        const preview = JSON.parse(output.match(/PREVIEW:(.+):PREVIEW_END/)[1]);
-        assert.deepEqual(preview.initial, ['error', 'warning', 'success', 'info']);
-        assert.equal(preview.afterShortcut, 5);
-        child.stdin.write('prompt-preview-test\n');
-        await Promise.race([waitFor(':PROMPT_PREVIEW_END'), failOnExit]);
-        const promptPreview = JSON.parse(output.match(/PROMPT_PREVIEW:(.+):PROMPT_PREVIEW_END/)[1]);
-        assert.deepEqual(promptPreview.initial, ['Example prompt']);
-        assert.equal(promptPreview.during, 1);
-        assert.deepEqual(promptPreview.afterClose, ['Example prompt']);
-        assert.equal(promptPreview.remaining, 0);
+        child.stdin.write('no-preview-test\n');
+        await Promise.race([waitFor(':NO_PREVIEW_END'), failOnExit]);
+        const preview = JSON.parse(output.match(/NO_PREVIEW:(.+):NO_PREVIEW_END/)[1]);
+        assert.deepEqual(preview.initial, { notifications: 0, prompts: 0 });
+        assert.deepEqual(preview.afterShortcuts, { notifications: 0, prompts: 0 });
         child.stdin.write('window\n');
         await Promise.race([waitFor(':WINDOW_END'), failOnExit]);
         const window = JSON.parse(output.match(/WINDOW:(.+):WINDOW_END/)[1]);
@@ -115,6 +136,10 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
             await Promise.race([waitFor('NOTIFICATIONS_TEST:PASS'), failOnExit]);
             child.stdin.write('prompts-test\n');
             await Promise.race([waitFor('PROMPTS_TEST:PASS'), failOnExit]);
+            child.stdin.write('project-creation-test\n');
+            await Promise.race([waitFor('PROJECT_CREATION_TEST:PASS'), failOnExit]);
+            child.stdin.write('project-opening-test\n');
+            await Promise.race([waitFor('PROJECT_OPENING_TEST:PASS'), failOnExit]);
         }
         assert.doesNotMatch(output, /Content Security Policy|PROBE_ERROR:/);
         child.stdin.write('menu\n');
@@ -125,7 +150,10 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
         const fileMenu = menu.find((item) => item.label === 'File').submenu;
         assert.deepEqual(fileMenu.map((item) => item.label),
             ['New Project', 'Open Project', 'Project Preferences', 'Close Project', 'Package Project']);
-        assert.ok(fileMenu.every((item) => !item.enabled));
+        assert.equal(fileMenu[0].enabled, true);
+        assert.equal(fileMenu[1].enabled, true);
+        assert.equal(fileMenu[2].enabled, false);
+        assert.ok(fileMenu.slice(3).every((item) => item.enabled));
         const editMenu = menu.find((item) => item.label === 'Edit').submenu;
         assert.deepEqual(editMenu.map((item) => item.label), ['Undo', 'Redo']);
         assert.deepEqual(editMenu.map((item) => item.role), ['undo', 'redo']);
@@ -177,6 +205,40 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
         assert.equal(outgoing.header.messageId, '18446744073709551615');
         assert.deepEqual(outgoing.payload, Buffer.from([0, 1, 128, 255]));
 
+        const protobuf = require('../Electron/node_modules/protobufjs');
+        const schema = protobuf.loadSync(path.join(__dirname, '../Schemas/fray.proto'));
+        const promptRequest = schema.lookupType('fray.PromptRequest');
+        const promptResponse = schema.lookupType('fray.PromptResponse');
+        const sendPrompt = (id, title) => socket.write(message.buildFrame({
+            destinationKind: message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER,
+            senderKind: message.ProcessKind.PROCESS_KIND_ENGINE,
+            commandId: message.Command.COMMAND_PROMPT_REQUEST,
+        }, { senderName: 'Engine', messageId: protobuf.util.Long.fromString(id),
+            payloadType: message.PayloadType.PAYLOAD_TYPE_PROTOBUF,
+            messageType: message.MessageType.MESSAGE_TYPE_PROMPT_REQUEST },
+        promptRequest.encode(promptRequest.fromObject({ title, buttons: [{ label: 'Proceed', value: 'yes' }] })).finish()));
+        sendPrompt('9007199254740993', 'Engine prompt one');
+        sendPrompt('9007199254740995', 'Engine prompt two');
+        child.stdin.write(`await-ui ${Buffer.from(JSON.stringify({ text: 'Engine prompt one', token: 'prompt-one' })).toString('base64')}\n`);
+        await Promise.race([waitFor('UI_FOUND:prompt-one'), failOnExit]);
+        child.stdin.write(`answer-prompt ${Buffer.from('Proceed').toString('base64')}\n`);
+        await Promise.race([waitFor('ANSWERED:Proceed'), failOnExit]);
+        child.stdin.write(`await-ui ${Buffer.from(JSON.stringify({ text: 'Engine prompt two', token: 'prompt-two' })).toString('base64')}\n`);
+        await Promise.race([waitFor('UI_FOUND:prompt-two'), failOnExit]);
+        child.stdin.write(`dismiss-prompt ${Buffer.from('Engine prompt two').toString('base64')}\n`);
+        await Promise.race([waitFor('DISMISSED:Engine prompt two'), failOnExit]);
+        for (let attempt = 0; attempt < 100 && received.filter((frame) =>
+            frame.prefix.commandId === message.Command.COMMAND_PROMPT_RESPONSE).length < 2; attempt++)
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        const replies = received.filter((frame) => frame.prefix.commandId === message.Command.COMMAND_PROMPT_RESPONSE);
+        assert.equal(replies.length, 2, output);
+        const decoded = replies.map((frame) => promptResponse.toObject(promptResponse.decode(frame.payload), { defaults: true, longs: String }));
+        assert.deepEqual(decoded.map(({ requestId, dismissed, value }) => ({ requestId, dismissed, value })), [
+            { requestId: '9007199254740993', dismissed: false, value: 'yes' },
+            { requestId: '9007199254740995', dismissed: true, value: '' },
+        ]);
+        assert.ok(replies.every((frame) => frame.prefix.destinationKind === message.ProcessKind.PROCESS_KIND_ENGINE));
+
         socket.write(message.buildFrame({
             destinationKind: message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER,
             senderKind: message.ProcessKind.PROCESS_KIND_ENGINE,
@@ -217,7 +279,7 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
     }
 });
 
-test('real Engine and renderer exchange frames and project requests', { timeout: 30000 }, async () => {
+test('real Engine and renderer exchange frames and project requests', { timeout: 60000 }, async () => {
     const vite = await import(pathToFileURL(require.resolve('../Electron/node_modules/vite')).href);
     const server = await vite.createServer({
         configFile: path.join(__dirname, '../Electron/vite.config.ts'),
@@ -243,7 +305,7 @@ test('real Engine and renderer exchange frames and project requests', { timeout:
         if (matches()) return Promise.resolve();
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => reject(new Error(
-                `Timed out waiting for ${description}.\nEngine: ${engineOutput}\nElectron: ${electronOutput}`)), 8000);
+                `Timed out waiting for ${description}.\nEngine: ${engineOutput}\nElectron: ${electronOutput}`)), 16000);
             waiters.push({ matches, resolve: () => { clearTimeout(timer); resolve(); } });
         });
     }
@@ -305,6 +367,143 @@ test('real Engine and renderer exchange frames and project requests', { timeout:
         await openProject('../outside', 'The project name or request is invalid.');
         await openProject('Conflicted', 'Both the working folder and archive exist; resolve the conflict before opening.');
         assert.equal(await fs.readFile(path.join(projectDirectory, 'Conflicted.fry'), 'utf8'), 'existing archive');
+        let uiToken = 0;
+        const encoded = (value) => Buffer.from(JSON.stringify(value)).toString('base64');
+        async function waitForUi(text) {
+            const token = ++uiToken;
+            electron.stdin.write(`await-ui ${encoded({ text, token })}\n`);
+            await Promise.race([waitFor(() => electronOutput.includes(`UI_FOUND:${token}\n`), `UI ${text}`), ...failures]);
+        }
+        async function answer(label) {
+            electron.stdin.write(`answer-prompt ${Buffer.from(label).toString('base64')}\n`);
+            await Promise.race([waitFor(() => electronOutput.includes(`ANSWERED:${label}\n`), `choice ${label}`), ...failures]);
+        }
+        const selected = path.join(projectDirectory, 'Chosen Location', 'Selected');
+        await fs.mkdir(path.dirname(selected));
+        electron.stdin.write(`new-project ${encoded([selected])}\n`);
+        await waitForUi(selected);
+        assert.deepEqual((await fs.readFile(path.join(selected, 'Selected.sqlite'))).subarray(0, 16),
+            Buffer.from('SQLite format 3\0'));
+
+        const existingFolder = path.join(projectDirectory, 'ExistingPlain');
+        const renamed = path.join(projectDirectory, 'Chosen Location', 'Renamed');
+        await fs.mkdir(existingFolder);
+        await fs.writeFile(path.join(existingFolder, 'marker.txt'), 'preserve');
+        electron.stdin.write(`new-project ${encoded([existingFolder, renamed])}\n`);
+        await waitForUi('Project already exists');
+        await answer('Choose Another Name');
+        await waitForUi(renamed);
+        const dialogDefaults = [...electronOutput.matchAll(/SAVE_DIALOG_DEFAULT:(.+)\n/g)]
+            .map((match) => JSON.parse(match[1]));
+        assert.deepEqual(dialogDefaults, [null, null, path.dirname(existingFolder)]);
+        assert.ok((await fs.stat(path.join(renamed, 'Renamed.sqlite'))).isFile());
+        assert.equal(await fs.readFile(path.join(existingFolder, 'marker.txt'), 'utf8'), 'preserve');
+
+        const validFolder = path.join(projectDirectory, 'ValidExisting');
+        await fs.mkdir(validFolder);
+        await fs.copyFile(path.join(selected, 'Selected.sqlite'), path.join(validFolder, 'ValidExisting.sqlite'));
+        electron.stdin.write(`new-project ${encoded([validFolder])}\n`);
+        await waitForUi('Project already exists');
+        await answer('Open Existing');
+        await waitForUi('Project opened');
+        assert.ok((await fs.stat(path.join(validFolder, 'ValidExisting.sqlite'))).isFile());
+
+        electron.stdin.write(`new-project ${encoded([existingFolder])}\n`);
+        await waitForUi('Project already exists');
+        electron.stdin.write(`answer-prompt ${Buffer.from('Open Existing').toString('base64')}\n`);
+        await waitForUi('no valid Fray database');
+        assert.equal(await fs.readFile(path.join(existingFolder, 'marker.txt'), 'utf8'), 'preserve');
+        assert.equal(await fs.stat(path.join(existingFolder, 'ExistingPlain.sqlite')).then(() => true, () => false), false);
+
+        const openFolder = path.join(projectDirectory, 'OpenFolder');
+        await fs.mkdir(openFolder);
+        await fs.copyFile(database, path.join(openFolder, 'OpenFolder.sqlite'));
+        electron.stdin.write(`choose-open-project ${encoded(openFolder)}\n`);
+        if (process.platform !== 'darwin') {
+            await waitForUi('Choose a project archive or working folder');
+            await answer('Choose Working Folder');
+        }
+        await waitForUi(openFolder);
+        assert.ok((await fs.stat(path.join(openFolder, 'OpenFolder.sqlite'))).isFile());
+
+        const validArchive = path.join(projectDirectory, 'ArchiveOpen.fry');
+        await fs.writeFile(validArchive, storedZip('ArchiveOpen.sqlite', await fs.readFile(database)));
+        electron.stdin.write(`choose-open-project ${encoded(validArchive)}\n`);
+        if (process.platform !== 'darwin') {
+            await waitForUi('Choose a project archive or working folder');
+            await answer('Choose Archive');
+        }
+        await waitForUi(path.join(projectDirectory, 'ArchiveOpen'));
+        assert.ok((await fs.stat(path.join(projectDirectory, 'ArchiveOpen', 'ArchiveOpen.sqlite'))).isFile());
+        assert.equal(await fs.stat(validArchive).then(() => true, () => false), false);
+
+        const createHere = path.join(projectDirectory, 'CreateHere');
+        await fs.mkdir(createHere);
+        await fs.writeFile(path.join(createHere, 'marker.txt'), 'preserve');
+        electron.stdin.write(`choose-open-project ${encoded(createHere)}\n`);
+        if (process.platform !== 'darwin') {
+            await waitForUi('Choose a project archive or working folder');
+            await answer('Choose Working Folder');
+        }
+        await waitForUi('No valid project database');
+        await answer('Create Project');
+        await waitForUi(createHere);
+        assert.ok((await fs.stat(path.join(createHere, 'CreateHere.sqlite'))).isFile());
+        assert.equal(await fs.readFile(path.join(createHere, 'marker.txt'), 'utf8'), 'preserve');
+
+        const occupied = path.join(projectDirectory, 'OccupiedDatabase');
+        await fs.mkdir(occupied);
+        await fs.writeFile(path.join(occupied, 'OccupiedDatabase.sqlite'), 'preserve invalid database');
+        electron.stdin.write(`choose-open-project ${encoded(occupied)}\n`);
+        if (process.platform !== 'darwin') {
+            await waitForUi('Choose a project archive or working folder');
+            await answer('Choose Working Folder');
+        }
+        await waitForUi('No valid project database');
+        await answer('Create Project');
+        await waitForUi('it was not overwritten');
+        assert.equal(await fs.readFile(path.join(occupied, 'OccupiedDatabase.sqlite'), 'utf8'), 'preserve invalid database');
+
+        const bothFolder = path.join(projectDirectory, 'BothOpen');
+        await fs.mkdir(bothFolder);
+        await fs.writeFile(path.join(bothFolder, 'marker.txt'), 'preserve');
+        await fs.writeFile(`${bothFolder}.fry`, storedZip('BothOpen.sqlite', await fs.readFile(database)));
+        electron.stdin.write(`choose-open-project ${encoded(bothFolder)}\n`);
+        if (process.platform !== 'darwin') {
+            await waitForUi('Choose a project archive or working folder');
+            await answer('Choose Working Folder');
+        }
+        await waitForUi('Choose a project to open');
+        await answer('Open Working Folder');
+        await waitForUi('No valid project database');
+        await answer('Create Project');
+        await waitForUi(bothFolder);
+        assert.ok((await fs.stat(path.join(bothFolder, 'BothOpen.sqlite'))).isFile());
+        assert.ok((await fs.stat(`${bothFolder}-unselected-1.fry`)).isFile());
+        assert.equal(await fs.readFile(path.join(bothFolder, 'marker.txt'), 'utf8'), 'preserve');
+
+        const badArchive = path.join(projectDirectory, 'Broken.fry');
+        await fs.writeFile(badArchive, 'not an archive');
+        electron.stdin.write(`choose-open-project ${encoded(badArchive)}\n`);
+        if (process.platform !== 'darwin') {
+            await waitForUi('Choose a project archive or working folder');
+            await answer('Choose Archive');
+        }
+        await waitForUi('Could not open project');
+        assert.equal(await fs.readFile(badArchive, 'utf8'), 'not an archive');
+        await fs.mkdir(`${bothFolder}.fry`);
+        electron.stdin.write('package-project\n');
+        await waitForUi('Could not package project');
+        assert.ok((await fs.stat(path.join(bothFolder, 'BothOpen.sqlite'))).isFile());
+        await fs.rmdir(`${bothFolder}.fry`);
+        electron.stdin.write('package-project\n');
+        await waitForUi('Project packaged');
+        assert.ok((await fs.stat(`${bothFolder}.fry`)).isFile());
+        assert.equal(await fs.stat(bothFolder).then(() => true, () => false), false);
+        electron.stdin.write('close-project\n');
+        await waitForUi('Project closed');
+        assert.ok((await fs.stat(path.join(createHere, 'CreateHere.sqlite'))).isFile());
+        assert.equal(await fs.stat(`${createHere}.fry`).then(() => true, () => false), false);
         electron.stdin.write('send\n');
         await Promise.race([
             waitFor(() => /command=77 sender=Renderer .*message_id=18446744073709551615 .*payload_bytes=4 /.test(engineOutput),
@@ -319,7 +518,7 @@ test('real Engine and renderer exchange frames and project requests', { timeout:
         const [[electronCode], [engineCode]] = await Promise.all([electronExit, engineExit]);
         assert.equal(electronCode, 0, electronOutput);
         assert.equal(engineCode, 0, engineOutput);
-        assert.ok((await fs.stat(path.join(projectDirectory, 'New Project.fry'))).isFile());
+        assert.ok((await fs.stat(database)).isFile());
         assert.match(electronOutput, /STATE:{"state":"stopped","threads":\[\]}/);
         assert.match(engineOutput, /Quit requested by the UI/);
         assert.match(engineOutput, /Electron Main is ready\./);

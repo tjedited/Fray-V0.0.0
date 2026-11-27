@@ -10,6 +10,10 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 export async function testNotifications(): Promise<void> {
   const host = document.createElement('div');
+  host.id = 'notification-probe-host';
+  const style = document.createElement('style');
+  style.textContent = '#notification-probe-host .notification, #notification-probe-host .notification * { pointer-events: none; }';
+  document.head.appendChild(style);
   document.body.appendChild(host);
   const root = createRoot(host);
   const clipboard = navigator.clipboard;
@@ -209,6 +213,7 @@ export async function testNotifications(): Promise<void> {
   } finally {
     root.unmount();
     host.remove();
+    style.remove();
     if (originalWriteText) Object.defineProperty(clipboard, 'writeText', originalWriteText);
     else Reflect.deleteProperty(clipboard, 'writeText');
   }

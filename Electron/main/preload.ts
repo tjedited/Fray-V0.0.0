@@ -22,6 +22,23 @@ const frayBridge: FrayBridge = {
     ipcRenderer.on('fray:shutdown', listener);
     return () => ipcRenderer.removeListener('fray:shutdown', listener);
   },
+  onNewProject: (handler) => {
+    const listener = () => handler();
+    ipcRenderer.on('fray:new-project', listener);
+    return () => ipcRenderer.removeListener('fray:new-project', listener);
+  },
+  chooseNewProjectPath: (previousPath) => ipcRenderer.invoke('fray:choose-new-project-path', previousPath),
+  onOpenProject: (handler) => {
+    const listener = () => handler();
+    ipcRenderer.on('fray:open-project', listener);
+    return () => ipcRenderer.removeListener('fray:open-project', listener);
+  },
+  chooseOpenProjectPath: (kind) => ipcRenderer.invoke('fray:choose-open-project-path', kind),
+  onCloseProject: (handler) => {
+    const listener = (_event: unknown, packageProject: boolean) => handler(packageProject);
+    ipcRenderer.on('fray:close-project', listener);
+    return () => ipcRenderer.removeListener('fray:close-project', listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('frayBridge', frayBridge);

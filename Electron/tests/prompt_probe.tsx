@@ -1,6 +1,8 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { PromptProvider, usePrompts, type PromptOptions } from '../renderer/prompts';
+import { createMessageHandler } from '../renderer/message_handler';
+import { parseFrame } from '../renderer/message';
 
 function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -12,6 +14,7 @@ export async function testPrompts(): Promise<void> {
   const host = document.createElement('div');
   document.body.appendChild(host);
   const root = createRoot(host);
+  let worker: Worker | undefined;
   let showPrompt: ((options: PromptOptions) => void) | undefined;
   const responses: (string | null)[] = [];
   function Capture(): null {
@@ -89,7 +92,29 @@ export async function testPrompts(): Promise<void> {
     close.click();
     await waitFor(() => !dialog(), 'Close button did not dismiss prompt.');
     check(responses[2] === null, 'Close button did not report cancellation.');
+
+    worker = new Worker(new URL('../renderer/message_worker.ts', import.meta.url), { type: 'module' });
+    const handler = createMessageHandler((frame) => {
+      const bytes = Uint8Array.from(frame);
+      worker!.postMessage({ type: 'send', frame: bytes.buffer }, [bytes.buffer]);
+    }, () => {}, showPrompt);
+    worker.addEventListener('message', ({ data }) => {
+      if (data.type === 'message') handler.onMessage(parseFrame(new Uint8Array(data.frame)));
+    });
+    let localResult: string | null | undefined;
+    handler.requestPrompt({
+      title: 'Local prompt',
+      buttons: [{ label: 'Local choice', value: 'local-value' }],
+    }, (value) => { localResult = value; });
+    await waitFor(() => !!dialog()?.textContent?.includes('Local prompt'), 'Renderer prompt message did not reach the UI.');
+    const localButton = [...dialog()!.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Local choice');
+    check(localButton, 'Local prompt button was not found.');
+    localButton.click();
+    await waitFor(() => localResult !== undefined, 'Renderer did not receive its prompt response.');
+    check(localResult === 'local-value', 'Renderer prompt response was incorrect.');
   } finally {
+    worker?.terminate();
     root.unmount();
     host.remove();
   }

@@ -105,7 +105,15 @@ function receive(buffer: ArrayBuffer): void {
 function send(buffer: ArrayBuffer): void {
   const { frame, prefix } = readFrame(buffer);
   const kind = prefix.destinationKind;
-  if (kind === SELF) throw new Error('Cannot send a message to the renderer itself.');
+  if (kind === SELF) {
+    if (prefix.senderKind !== SELF || prefix.destinationId !== 0 ||
+        (prefix.commandId !== Command.COMMAND_PROMPT_REQUEST && prefix.commandId !== Command.COMMAND_PROMPT_RESPONSE))
+      throw new Error('Cannot send this message to the renderer itself.');
+    const { header } = parseFrame(frame);
+    noteProgress(prefix.commandId);
+    worker.postMessage({ type: 'message', prefix, header, frame: buffer }, [buffer]);
+    return;
+  }
   noteProgress(prefix.commandId);
   if (kind === ProcessKind.PROCESS_KIND_BROADCAST || prefix.commandId === Command.COMMAND_READY
       || prefix.commandId === Command.COMMAND_REQUEST_READY || prefix.commandId === Command.COMMAND_PING

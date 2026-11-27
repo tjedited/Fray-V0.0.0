@@ -34,16 +34,50 @@ Electron Main and the renderer assign odd message IDs to their main/UI threads
 and even IDs to their workers. Builders in the same thread share their ID
 sequence. The Engine uses its process-wide atomic counter.
 
-### Project open requests
+### Prompts and New Project
 
-The renderer's project message handler can send an asynchronous protobuf request
-to the Engine, which asks FrayManager to open it. A missing project is created
-in the Engine's working directory; an existing project is opened. With
-`compile-run-all.sh`, the working directory is `Engine/`. An already-open
-project, invalid name, or unresolved folder/archive or database conflict returns
-an error. The current blank UI does not expose a project-opening control.
-The existing `project.preferences.packageOnClose` setting controls packaging
-when the project closes.
+Engine, Electron Main, and renderer code can request a user prompt asynchronously.
+Requests carry a title, optional description, buttons, and an optional dismissible
+flag (default true). Responses are correlated to the request ID and report a
+choice, dismissal, or error. Engine callbacks run on its application thread.
+Use `FrayManager::requestPrompt` in the Engine, `requestPrompt` in Electron Main,
+or `usePromptMessages` in renderer components. Prompts are non-modal, draggable,
+and shown one at a time.
+
+File > New Project opens a native save dialog to choose a project name and
+location; the Engine creates a working folder there, not a file at the selected
+path. If a folder or `.fry` archive exists, the prompt offers to open it or
+choose another name. Choosing another name reopens the picker in the same folder.
+If both exist, choose which to open; the other is renamed.
+The Engine rechecks conflicts, validates existing databases, and reports success
+or failure through notifications. Native save-dialog behavior varies by OS and
+may include its own overwrite confirmation. An already-open project with the
+same name cannot currently be opened from another directory.
+
+File > Open Project selects a `.fry` archive or working folder. On platforms
+that cannot select files and folders in one dialog, choose which kind first.
+If both the archive and folder exist, choose which to open; the other is renamed.
+If a selected folder has no valid Fray database, the prompt offers to create a
+project in that folder. Existing files are preserved, and creation fails rather
+than overwriting an occupied database path. Opening an archive extracts it into
+a working folder and removes the archive after a successful open; the packaging
+preference controls what happens when the project later closes.
+
+File > Close Project closes the most recently opened project, honoring its
+`project.preferences.packageOnClose` preference. File > Package Project closes
+and packages that project regardless of the preference, without changing it.
+After a project closes, the previous successfully opened project becomes active.
+Both actions report their result through a notification.
+
+The renderer's older asynchronous project-open request still opens or creates a
+project in the Engine's working directory. With `compile-run-all.sh`, that is
+`Engine/`. The `project.preferences.packageOnClose` setting controls packaging
+when a project closes.
+
+Router queues can discard messages when a neighbor goes down or is unreachable;
+there is not yet a delivery acknowledgement or timeout for every request.
+Pending requests therefore cannot all be guaranteed a response after a
+disconnect or queue discard.
 
 ### Readiness
 
@@ -176,18 +210,17 @@ both. `npm run start` builds Main first, so rerun it after editing Main code.
 mode; Vite itself only strips types and does not check them). The editor
 discovers Main and renderer settings through their `tsconfig.json` files.
 
-The application menu has File and Edit menus. The project commands are disabled
-placeholders; Edit uses native Undo and Redo for text editing, not project
+The application menu has File and Edit menus. New Project and Open Project are
+enabled; the other project commands are disabled placeholders. Edit uses native Undo and Redo for text editing, not project
 history. On macOS, the application menu retains Quit. The window starts
 frameless and windowed, with a draggable dark title bar above a black renderer.
 On macOS, the native window buttons remain visible. A fullscreen preference is
 not yet implemented.
 
-### Notification preview
+### Notifications
 
-The renderer includes a temporary notification preview on startup and on
-Ctrl+Shift+N (Cmd+Shift+N on macOS). Notifications stack at the bottom right,
-with new arrivals pushing older notifications up and up to five visible.
+Notifications stack at the bottom right, with new arrivals pushing older
+notifications up and up to five visible.
 Dismissed notifications fade out. New arrivals wait while a notification is hovered;
 other visible notifications continue timing out. The hovered notification's
 progress bar is hidden until its timer restarts on mouse leave. Notifications
@@ -196,17 +229,15 @@ timeout or `null` for no timeout. The copy button copies the title and optional
 description as plain text; an error is shown if copying fails.
 Notifications use an MUI icon for their type. To override it, pass a React
 element as the `icon` option to `notify`, or pass `null` to hide the icon.
-The notification component is not yet connected to process messages or logs.
+New Project uses notifications for its results. Process log routing is not yet implemented.
 
-### Prompt preview
+### Prompts
 
-The renderer also shows a temporary prompt preview on startup and on
-Ctrl+Shift+P (Cmd+Shift+P on macOS). Prompts are non-modal and can be dragged
-from anywhere except their buttons. Multiple requests are queued and shown
+Prompts are non-modal and can be dragged from anywhere except their buttons.
+Multiple requests are queued and shown
 one at a time. A prompt has a title, optional description, and caller-supplied
 buttons. The close button is enabled by default and can be disabled by the
 caller; closing reports `null`, while a choice reports its supplied value.
-Prompts are not yet connected to process messages.
 
 Material UI uses Emotion's inline styles. The renderer's content security
 policy permits inline styles but continues to restrict scripts to `'self'`.
@@ -297,18 +328,19 @@ snapshots included. With `project.preferences.packageOnClose` off, the working
 folder stays and no `.fry` is written.
 
 State changes are written to the working SQLite database immediately. By default,
-the ZIP archive is created or updated when the project closes and, after it is
-written successfully, the working folder is removed. To leave the working
-folder instead, set the persistent boolean preference:
+the working folder remains when the project closes. To create or update the ZIP
+archive on close and remove the working folder after it is written successfully,
+set the persistent boolean preference:
 
 ```cpp
-ERR(project.set("project.preferences.packageOnClose", false));
+ERR(project.set("project.preferences.packageOnClose", true));
 ```
 
-Set it to `true` to package again. When packaging is disabled, an existing
+Existing projects retain their saved preference. Set it to `false` to leave the
+working folder, or use File > Package Project for a one-time packaged close.
+When packaging is disabled, an existing
 archive is left unchanged, so both copies may exist and require conflict
-resolution the next time the project is opened. The example engine startup
-explicitly sets the preference to `true` on every run.
+resolution the next time the project is opened.
 
 Call `close()` explicitly
 and check its result: if archiving fails, the working folder is retained and

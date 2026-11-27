@@ -53,7 +53,7 @@ namespace fray
             std::atomic<bool> _open{false};
             std::atomic<bool> _opening{false};
             bool _closing = false;
-            bool _packageOnClose = true;
+            bool _packageOnClose = false;
             bool _archiveComplete = false;
             bool _pendingDatabase = false;
             std::vector<std::string> _candidates;
@@ -151,6 +151,8 @@ namespace fray
             {
                 if (removeExtracted && _files._extracted && _files.removeWorkingDirectory() != errors::NONE)
                     log::engineError("Could not remove the extracted working folder.");
+                if (!_files.rollbackConflict())
+                    log::engineError("Could not restore the unselected project after opening failed.");
                 if (_files.close() != errors::NONE)
                     log::engineError("Could not release project after opening failed.");
                 _applicationId.clear();
@@ -199,7 +201,7 @@ namespace fray
                 apply("project.info.projectVersion.bug", 0);
 
                 /* Project Preferences */
-                apply("project.preferences.packageOnClose", true);
+                apply("project.preferences.packageOnClose", false);
                 return result;
             }
 
@@ -226,6 +228,12 @@ namespace fray
                     state.reset();
                     abandon(false);
                     return result;
+                }
+                if (!_files.commitConflict())
+                {
+                    state.reset();
+                    abandon(false);
+                    return errors::FAILED_OPEN_PROJECT;
                 }
                 _states.emplace("Fray", std::move(state));
                 if (snapshot)
@@ -444,7 +452,8 @@ namespace fray
                 const std::string& applicationId,
                 files::ConflictChoice choice = files::ConflictChoice::Ask,
                 threads::ThreadManager* threads = nullptr,
-                std::shared_ptr<threads::TaskQueue> queue = nullptr)
+                std::shared_ptr<threads::TaskQueue> queue = nullptr,
+                files::OpenMode mode = files::OpenMode::OpenOrCreate)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (_open || _files.isOpen() || _pendingDatabase)
@@ -455,14 +464,103 @@ namespace fray
                 _opening = true;
                 _threads = threads;
                 _queue = std::move(queue);
-                const F_err opened = _files.open(path, choice);
+                const F_err opened = _files.open(path, choice, mode, true);
                 if (opened != errors::NONE)
                 {
                     _opening = false;
                     return opened;
                 }
                 _applicationId = applicationId;
-                const F_err prepared = prepareDatabase();
+                if (mode == files::OpenMode::OpenExisting || mode == files::OpenMode::OpenSelected)
+                {
+                    const auto folder = _files.workingDirectory();
+                    const auto named = folder / (_files.projectName() + ".sqlite");
+                    bool namedExists = false;
+                    if (!files::FileManager::pathExists(named, namedExists))
+                    {
+                        abandon(true);
+                        return errors::FAILED_OPEN_PROJECT;
+                    }
+                    bool valid = false;
+                    if (namedExists)
+                    {
+                        std::error_code error;
+                        const auto status = std::filesystem::symlink_status(named, error);
+                        valid = !error && std::filesystem::is_regular_file(status) && looksLikeFrayDatabase(named);
+                        if (!valid)
+                        {
+                            for (const auto& stem : databaseFiles(folder))
+                            {
+                                if (stem != _files.projectName() && looksLikeFrayDatabase(folder / (stem + ".sqlite")))
+                                {
+                                    log::engineError("Cannot open project: its database path is occupied.");
+                                    abandon(true);
+                                    return errors::PROJECT_DATABASE_OCCUPIED;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        for (const auto& stem : databaseFiles(folder))
+                            if (looksLikeFrayDatabase(folder / (stem + ".sqlite")))
+                            {
+                                valid = true;
+                                break;
+                            }
+                    }
+                    if (!valid)
+                    {
+                        log::engineError("Cannot open project: no valid Fray database.");
+                        abandon(true);
+                        return errors::INVALID_PROJECT_DATABASE;
+                    }
+                }
+                if (mode == files::OpenMode::CreateInFolder || mode == files::OpenMode::CreateInFolderResolve)
+                {
+                    const auto folder = _files.workingDirectory();
+                    for (const auto& stem : databaseFiles(folder))
+                    {
+                        if (looksLikeFrayDatabase(folder / (stem + ".sqlite")))
+                        {
+                            log::engineError("Cannot create project: the folder now contains a valid Fray database.");
+                            abandon(false);
+                            return errors::PROJECT_FOLDER_EXISTS;
+                        }
+                    }
+                    const auto database = folder / (_files.projectName() + ".sqlite");
+                    for (const auto* suffix : {"", "-wal", "-shm", "-journal"})
+                    {
+                        bool exists = false;
+                        if (!files::FileManager::pathExists(database.string() + suffix, exists))
+                        {
+                            abandon(false);
+                            return errors::FAILED_OPEN_PROJECT;
+                        }
+                        if (exists)
+                        {
+                            log::engineError("Cannot create project: a database file already exists.");
+                            abandon(false);
+                            return errors::PROJECT_DATABASE_OCCUPIED;
+                        }
+                    }
+#ifdef _WIN32
+                    HANDLE created = CreateFileW(database.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (created == INVALID_HANDLE_VALUE || !CloseHandle(created))
+#else
+                    const int created = ::open(database.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+                    if (created < 0 || ::close(created) != 0)
+#endif
+                    {
+                        log::engineError("Cannot create project database without overwriting an existing file.");
+                        abandon(false);
+                        return errors::FAILED_OPEN_PROJECT;
+                    }
+                }
+                const F_err prepared = mode == files::OpenMode::CreateInFolder ||
+                                       mode == files::OpenMode::CreateInFolderResolve
+                    ? errors::NONE : prepareDatabase();
                 if (prepared == errors::DATABASE_CONFLICT)
                     return prepared;
                 if (prepared != errors::NONE)
@@ -688,7 +786,9 @@ namespace fray
                 return _states.at("Fray")->get(key, value);
             }
 
-            F_err close()
+            F_err close(
+                bool forcePackage = false,
+                bool* packaged = nullptr)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 if (!_open)
@@ -705,14 +805,18 @@ namespace fray
                     F_bool exists = false;
                     if (state.contains("project.preferences.packageOnClose", exists) != errors::NONE)
                         return errors::FAILED_CLOSE_PROJECT;
-                    _packageOnClose = true;
-                    if (exists && state.get("project.preferences.packageOnClose", _packageOnClose) != errors::NONE)
+                    _packageOnClose = false;
+                    if (!forcePackage && exists && state.get("project.preferences.packageOnClose", _packageOnClose) != errors::NONE)
                     {
                         log::engineError("Cannot close project: packageOnClose must be a boolean.");
                         return errors::FAILED_CLOSE_PROJECT;
                     }
+                    if (forcePackage)
+                        _packageOnClose = true;
                     _closing = true;
                 }
+                else if (forcePackage)
+                    _packageOnClose = true;
                 for (auto& entry : _states)
                     if (entry.second->isOpen() && entry.second->close() != errors::NONE)
                         return errors::FAILED_CLOSE_PROJECT;
@@ -726,11 +830,13 @@ namespace fray
                     return errors::FAILED_CLOSE_PROJECT;
                 if (_files.close() != errors::NONE)
                     return errors::FAILED_CLOSE_PROJECT;
+                if (packaged)
+                    *packaged = _packageOnClose;
                 _states.clear();
                 _applicationId.clear();
                 _open = false;
                 _closing = false;
-                _packageOnClose = true;
+                _packageOnClose = false;
                 _archiveComplete = false;
                 return errors::NONE;
             }

@@ -51,7 +51,13 @@ namespace fray
     X(FAILED_SPAWN_PROCESS, "Failed to spawn the process.") \
     X(INVALID_MESSAGE, "The message is malformed.") \
     X(MESSAGE_TOO_LARGE, "The message exceeds the maximum frame size.") \
-    X(UNSUPPORTED_MESSAGE_VERSION, "The message prefix version is not supported.")
+    X(UNSUPPORTED_MESSAGE_VERSION, "The message prefix version is not supported.") \
+    X(PROJECT_FOLDER_EXISTS, "A project folder already exists.") \
+    X(PROJECT_ARCHIVE_EXISTS, "A project archive already exists.") \
+    X(PROJECT_BOTH_EXIST, "A project folder and archive already exist.") \
+    X(PROJECT_NOT_FOUND, "The selected project does not exist.") \
+    X(INVALID_PROJECT_DATABASE, "The selected project has no valid Fray database.") \
+    X(PROJECT_DATABASE_OCCUPIED, "A project database path is already occupied.")
 
         enum code : F_err
         {

@@ -151,7 +151,11 @@ namespace fray
                     {
                         _outgoing.setState(neighbor, state);
                         if (state == routing::NeighborState::down || state == routing::NeighborState::unreachable)
+                        {
                             _outgoing.discardQueue(neighbor);
+                            if (neighbor == PROCESS_KIND_ELECTRON_MAIN)
+                                _application.cancelPrompts("Electron Main is unavailable.");
+                        }
                         if (state == routing::NeighborState::probing) return;
                         const char *name = state == routing::NeighborState::suspect ? "SUSPECT" :
                             state == routing::NeighborState::degraded ? "DEGRADED" :
@@ -303,16 +307,20 @@ namespace fray
             // The router delivers it now if its destination is ready, otherwise it waits in that destination's queue
             // for as long as the header's ttl_ms allows (0 = until the destination is ready).
             // Nothing is sent back to the caller either way.
-            F_void send(
+            bool send(
                 Frame frame)
             {
                 if (!frame)
                 {
                     fray::log::engineError("Cannot send an empty frame pointer.");
-                    return;
+                    return false;
                 }
                 if (!_messages.post([this, frame = std::move(frame)]() { route(frame); }))
+                {
                     fray::log::engineError("Cannot send message: message thread is shutting down.");
+                    return false;
+                }
+                return true;
             }
 
             F_void sendBuilt(

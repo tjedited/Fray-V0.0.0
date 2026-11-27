@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron');
 
 let contents;
 app.on('browser-window-created', (_event, win) => {
@@ -15,7 +15,97 @@ ipcMain.on('fray:renderer-state', (_event, state) => {
 });
 
 require('node:readline').createInterface({ input: process.stdin }).on('line', async (command) => {
-    if (command.startsWith('open-project ')) {
+    if (command.startsWith('new-project ')) {
+        try {
+            const paths = JSON.parse(Buffer.from(command.slice('new-project '.length), 'base64').toString('utf8'));
+            dialog.showSaveDialog = async (_window, options) => {
+                if (!paths.length) throw new Error('No mocked project path remains.');
+                console.log(`SAVE_DIALOG_DEFAULT:${JSON.stringify(options.defaultPath ?? null)}`);
+                const filePath = paths.shift();
+                return { canceled: filePath === null, filePath: filePath ?? undefined };
+            };
+            Menu.getApplicationMenu().items.find((item) => item.label === 'File')
+                .submenu.items.find((item) => item.label === 'New Project').click();
+            console.log('NEW_PROJECT_STARTED');
+        } catch (error) {
+            console.error(`PROBE_ERROR:${error.message}`);
+            app.exit(1);
+        }
+    } else if (command.startsWith('choose-open-project ')) {
+        try {
+            const filePath = JSON.parse(Buffer.from(command.slice('choose-open-project '.length), 'base64').toString('utf8'));
+            dialog.showOpenDialog = async (_window, options) => {
+                console.log(`OPEN_DIALOG:${JSON.stringify(options.properties)}`);
+                return { canceled: filePath === null, filePaths: filePath === null ? [] : [filePath] };
+            };
+            Menu.getApplicationMenu().items.find((item) => item.label === 'File')
+                .submenu.items.find((item) => item.label === 'Open Project').click();
+            console.log('OPEN_PROJECT_STARTED');
+        } catch (error) {
+            console.error(`PROBE_ERROR:${error.message}`);
+            app.exit(1);
+        }
+    } else if (command === 'close-project' || command === 'package-project') {
+        const label = command === 'close-project' ? 'Close Project' : 'Package Project';
+        Menu.getApplicationMenu().items.find((item) => item.label === 'File')
+            .submenu.items.find((item) => item.label === label).click();
+        console.log(`PROJECT_ACTION:${label}`);
+    } else if (command.startsWith('answer-prompt ')) {
+        try {
+            const label = Buffer.from(command.slice('answer-prompt '.length), 'base64').toString('utf8');
+            await contents.executeJavaScript(`(() => {
+                const button = [...document.querySelectorAll('[role="dialog"] button')]
+                    .find((element) => element.textContent === ${JSON.stringify(label)});
+                if (!button) throw new Error('Prompt choice not found.');
+                button.click();
+            })()`);
+            console.log(`ANSWERED:${label}`);
+        } catch (error) {
+            console.error(`PROBE_ERROR:${error.message}`);
+            app.exit(1);
+        }
+    } else if (command.startsWith('dismiss-prompt ')) {
+        try {
+            const title = Buffer.from(command.slice('dismiss-prompt '.length), 'base64').toString('utf8');
+            await contents.executeJavaScript(`(() => {
+                const button = [...document.querySelectorAll('[role="dialog"] button')]
+                    .find((element) => element.getAttribute('aria-label') === ${JSON.stringify(`Dismiss ${title}`)});
+                if (!button) throw new Error('Prompt close button not found.');
+                button.click();
+            })()`);
+            console.log(`DISMISSED:${title}`);
+        } catch (error) {
+            console.error(`PROBE_ERROR:${error.message}`);
+            app.exit(1);
+        }
+    } else if (command.startsWith('await-ui ')) {
+        try {
+            const { text, token } = JSON.parse(Buffer.from(command.slice('await-ui '.length), 'base64').toString('utf8'));
+            await contents.executeJavaScript(`new Promise((resolve, reject) => {
+                const seen = new Set();
+                const check = () => {
+                    const elements = [...document.querySelectorAll('[role="dialog"], .notification')];
+                    for (const element of elements) seen.add(element.textContent);
+                    if (elements.some((element) => element.textContent.includes(${JSON.stringify(text)}))) {
+                        observer.disconnect();
+                        clearTimeout(timer);
+                        resolve();
+                    }
+                };
+                const observer = new MutationObserver(check);
+                const timer = setTimeout(() => {
+                    observer.disconnect();
+                    reject(new Error('UI text timed out: ' + JSON.stringify([...seen])));
+                }, 15000);
+                observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                check();
+            })`);
+            console.log(`UI_FOUND:${token}`);
+        } catch (error) {
+            console.error(`PROBE_ERROR:${error.message}`);
+            app.exit(1);
+        }
+    } else if (command.startsWith('open-project ')) {
         const name = Buffer.from(command.slice('open-project '.length), 'base64').toString('utf8');
         try {
             const status = await contents.executeJavaScript(`Promise.all([
@@ -40,37 +130,19 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', as
             console.error(`PROBE_ERROR:${error.message}`);
             app.exit(1);
         }
-    } else if (command === 'preview-test') {
+    } else if (command === 'no-preview-test') {
         try {
             const result = await contents.executeJavaScript(`new Promise((resolve) => {
-                const cards = () => [...document.querySelectorAll('.notification-stack [data-notification-id]')];
-                for (const card of cards()) card.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }));
-                const initial = cards().map((card) => card.dataset.notificationType);
+                const counts = () => ({
+                    notifications: document.querySelectorAll('.notification-stack [data-notification-id]').length,
+                    prompts: document.querySelectorAll('[role="dialog"]').length,
+                });
+                const initial = counts();
                 window.dispatchEvent(new KeyboardEvent('keydown', { key: 'N', ctrlKey: true, shiftKey: true }));
-                requestAnimationFrame(() => resolve({ initial, afterShortcut: cards().length }));
-            })`);
-            console.log(`PREVIEW:${JSON.stringify(result)}:PREVIEW_END`);
-        } catch (error) {
-            console.error(`PROBE_ERROR:${error.message}`);
-            app.exit(1);
-        }
-    } else if (command === 'prompt-preview-test') {
-        try {
-            const result = await contents.executeJavaScript(`(async () => {
-                const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
-                const dialogs = () => [...document.querySelectorAll('[role="dialog"]')];
-                const initial = dialogs().map((dialog) => dialog.querySelector('.prompt-title')?.textContent);
                 window.dispatchEvent(new KeyboardEvent('keydown', { key: 'P', ctrlKey: true, shiftKey: true }));
-                await nextFrame();
-                const during = dialogs().length;
-                dialogs()[0].querySelector('[aria-label^="Dismiss "]').click();
-                await nextFrame();
-                const afterClose = dialogs().map((dialog) => dialog.querySelector('.prompt-title')?.textContent);
-                dialogs()[0].querySelector('[aria-label^="Dismiss "]').click();
-                await nextFrame();
-                return { initial, during, afterClose, remaining: dialogs().length };
-            })()`);
-            console.log(`PROMPT_PREVIEW:${JSON.stringify(result)}:PROMPT_PREVIEW_END`);
+                requestAnimationFrame(() => resolve({ initial, afterShortcuts: counts() }));
+            })`);
+            console.log(`NO_PREVIEW:${JSON.stringify(result)}:NO_PREVIEW_END`);
         } catch (error) {
             console.error(`PROBE_ERROR:${error.message}`);
             app.exit(1);
@@ -89,6 +161,24 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', as
             const modulePath = `/@fs${require('node:path').join(__dirname, 'prompt_probe.tsx')}`;
             await contents.executeJavaScript(`import(${JSON.stringify(modulePath)}).then((module) => module.testPrompts())`);
             console.log('PROMPTS_TEST:PASS');
+        } catch (error) {
+            console.error(`PROBE_ERROR:${error.message}`);
+            app.exit(1);
+        }
+    } else if (command === 'project-creation-test') {
+        try {
+            const modulePath = `/@fs${require('node:path').join(__dirname, 'project_creation_probe.ts')}`;
+            await contents.executeJavaScript(`import(${JSON.stringify(modulePath)}).then((module) => module.testProjectCreation())`);
+            console.log('PROJECT_CREATION_TEST:PASS');
+        } catch (error) {
+            console.error(`PROBE_ERROR:${error.message}`);
+            app.exit(1);
+        }
+    } else if (command === 'project-opening-test') {
+        try {
+            const modulePath = `/@fs${require('node:path').join(__dirname, 'project_opening_probe.ts')}`;
+            await contents.executeJavaScript(`import(${JSON.stringify(modulePath)}).then((module) => module.testProjectOpening())`);
+            console.log('PROJECT_OPENING_TEST:PASS');
         } catch (error) {
             console.error(`PROBE_ERROR:${error.message}`);
             app.exit(1);
