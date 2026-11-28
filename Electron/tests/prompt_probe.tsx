@@ -101,18 +101,21 @@ export async function testPrompts(): Promise<void> {
     worker.addEventListener('message', ({ data }) => {
       if (data.type === 'message') handler.onMessage(parseFrame(new Uint8Array(data.frame)));
     });
-    let localResult: string | null | undefined;
-    handler.requestPrompt({
+    const requestId = handler.requestPrompt({
       title: 'Local prompt',
       buttons: [{ label: 'Local choice', value: 'local-value' }],
-    }, (value) => { localResult = value; });
+    });
     await waitFor(() => !!dialog()?.textContent?.includes('Local prompt'), 'Renderer prompt message did not reach the UI.');
     const localButton = [...dialog()!.querySelectorAll<HTMLButtonElement>('button')]
       .find((button) => button.textContent === 'Local choice');
     check(localButton, 'Local prompt button was not found.');
     localButton.click();
-    await waitFor(() => localResult !== undefined, 'Renderer did not receive its prompt response.');
-    check(localResult === 'local-value', 'Renderer prompt response was incorrect.');
+    let localResult = handler.takePromptResult(requestId);
+    await waitFor(() => {
+      localResult ??= handler.takePromptResult(requestId);
+      return localResult !== undefined;
+    }, 'Renderer did not receive its prompt response.');
+    check(localResult?.value === 'local-value', 'Renderer prompt response was incorrect.');
   } finally {
     worker?.terminate();
     root.unmount();

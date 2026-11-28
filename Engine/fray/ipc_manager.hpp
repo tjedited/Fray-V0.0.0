@@ -469,15 +469,12 @@ namespace fray
                             ++_processedCount;
                             _lastProgress = std::chrono::steady_clock::now();
                         }
-                        if (routing::handleEngineMessage(incoming) == routing::Action::stop) stop();
-                        else
-                        {
-                            handleReadiness(incoming);
-                            if (prefix.commandId != COMMAND_READY &&
-                                prefix.commandId != COMMAND_REQUEST_READY && prefix.commandId != COMMAND_PING &&
-                                prefix.commandId != COMMAND_PONG)
-                                _application.handleApplicationMessage(incoming, *this);
-                        }
+                        routing::handleEngineMessage(incoming);
+                        handleReadiness(incoming);
+                        if (prefix.commandId != COMMAND_READY &&
+                            prefix.commandId != COMMAND_REQUEST_READY && prefix.commandId != COMMAND_PING &&
+                            prefix.commandId != COMMAND_PONG)
+                            _application.handleApplicationMessage(incoming, *this);
                     } }))
                     fray::log::engineError("Cannot queue message: message thread is shutting down.");
             }
@@ -661,6 +658,6 @@ namespace fray
 } // namespace fray
 
 // The handler needs the complete IPCManager type to send its response.
-#include "fray_manager_message.hpp"
+#include "fray_message_handler.hpp"
 
 #endif

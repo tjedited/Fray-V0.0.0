@@ -24,13 +24,23 @@ const frayBridge = {
     electron.ipcRenderer.on("fray:new-project", listener);
     return () => electron.ipcRenderer.removeListener("fray:new-project", listener);
   },
-  chooseNewProjectPath: (previousPath) => electron.ipcRenderer.invoke("fray:choose-new-project-path", previousPath),
+  chooseNewProjectPath: (previousPath) => electron.ipcRenderer.send("fray:choose-new-project-path", previousPath),
+  onNewProjectPath: (handler) => {
+    const listener = (_event, result) => handler(result);
+    electron.ipcRenderer.on("fray:new-project-path", listener);
+    return () => electron.ipcRenderer.removeListener("fray:new-project-path", listener);
+  },
   onOpenProject: (handler) => {
     const listener = () => handler();
     electron.ipcRenderer.on("fray:open-project", listener);
     return () => electron.ipcRenderer.removeListener("fray:open-project", listener);
   },
-  chooseOpenProjectPath: (kind) => electron.ipcRenderer.invoke("fray:choose-open-project-path", kind),
+  chooseOpenProjectPath: (kind) => electron.ipcRenderer.send("fray:choose-open-project-path", kind),
+  onOpenProjectPath: (handler) => {
+    const listener = (_event, result) => handler(result);
+    electron.ipcRenderer.on("fray:open-project-path", listener);
+    return () => electron.ipcRenderer.removeListener("fray:open-project-path", listener);
+  },
   onCloseProject: (handler) => {
     const listener = (_event, packageProject) => handler(packageProject);
     electron.ipcRenderer.on("fray:close-project", listener);

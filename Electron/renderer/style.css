@@ -10,7 +10,7 @@ body,
 .title-bar {
   height: 35px;
   background: #1a1a1a;
-  app-region: drag;
+  -webkit-app-region: drag;
 }
 
 .title-bar-mac {

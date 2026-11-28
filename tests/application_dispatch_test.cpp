@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <thread>
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -20,6 +21,42 @@ int main(int argc, char** argv)
     fray::threads::ThreadManager threads;
     fray::FrayManager app(threads);
     auto ipc = std::make_unique<fray::ipc::IPCManager>(threads, app);
+
+    assert(app.openProject("Target").get() == fray::errors::NONE);
+    auto& target = app.project("Target");
+    assert(app.openProject("Latest").get() == fray::errors::NONE);
+    fray::ProjectCloseRequest closeRequest;
+    closeRequest.set_package(true);
+    fray::message::Prefix closePrefix;
+    closePrefix.destinationKind = fray::PROCESS_KIND_ENGINE;
+    closePrefix.senderKind = fray::PROCESS_KIND_ELECTRON_RENDERER;
+    closePrefix.commandId = fray::COMMAND_CLOSE_PROJECT;
+    fray::Header closeHeader;
+    closeHeader.set_message_id(41);
+    closeHeader.set_target_project("Target");
+    closeHeader.set_payload_type(fray::PAYLOAD_TYPE_PROTOBUF);
+    closeHeader.set_message_type(fray::MESSAGE_TYPE_PROJECT_CLOSE_REQUEST);
+    const std::string closePayload = closeRequest.SerializeAsString();
+    auto closeBytes = std::make_shared<std::vector<F_uchar>>();
+    assert(fray::message::buildFrame(closePrefix, closeHeader,
+                                    reinterpret_cast<const F_uchar*>(closePayload.data()),
+                                    closePayload.size(), *closeBytes) == fray::errors::NONE);
+    fray::message::InData closeIncoming;
+    assert(fray::message::parseFrame(closeBytes, closeIncoming) == fray::errors::NONE);
+    app.handleApplicationMessage(closeIncoming, *ipc);
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (target.isOpen() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(10ms);
+    assert(!target.isOpen());
+    assert(fs::is_regular_file("Target.fry") && !fs::exists("Target"));
+    assert(app.project("Latest").isOpen());
+    closeIncoming.header.set_target_project("Missing");
+    app.handleApplicationMessage(closeIncoming, *ipc);
+    assert(app.project("Latest").isOpen());
+    closeIncoming.header.set_target_project("Latest");
+    closeIncoming.header.set_message_type(fray::MESSAGE_TYPE_NONE);
+    app.handleApplicationMessage(closeIncoming, *ipc);
+    assert(app.project("Latest").isOpen());
 
     std::promise<void> blocked;
     std::promise<void> release;

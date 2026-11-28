@@ -217,8 +217,14 @@ class IPCManager extends node_events.EventEmitter {
     for (const [name, worker] of workers) {
       worker.on("exit", () => {
         if (!this.closing) {
-          log_manager.electronWarn("Thread %s stopped; closing IPC.", name);
-          this.close();
+          if (name === "network") {
+            this.connected = false;
+            this.router.postMessage({ type: "network-ended" });
+            log_manager.electronWarn("Network thread stopped; Main and Renderer routing remains available.");
+          } else {
+            log_manager.electronWarn("Thread %s stopped; closing IPC.", name);
+            void this.close();
+          }
         }
       });
     }
@@ -256,8 +262,7 @@ class IPCManager extends node_events.EventEmitter {
   }
   async stop(finalFrame) {
     this.network.postMessage({ type: "shutdown", frame: this.connected ? finalFrame : null });
-    if (!this.threads.runningNames().includes("network"))
-      this.router.postMessage({ type: "shutdown" });
+    this.router.postMessage({ type: "shutdown" });
     let timer;
     const timeout = new Promise((resolve) => {
       timer = setTimeout(() => resolve(false), 1e3);

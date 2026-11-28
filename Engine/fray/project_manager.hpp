@@ -20,6 +20,8 @@
 
 namespace fray
 {
+    class ProjectCloseRequest;
+
     // How to settle several candidate database files when none is named after the project.
     struct DatabaseChoice
     {
@@ -66,7 +68,7 @@ namespace fray
             mutable std::mutex _threadMutex;
             std::vector<threads::ThreadManager::Id> _registered;
             threads::ThreadManager::Id _watcherThread = 0;
-            std::function<void(const std::string&, const std::string&)> _onRenamed;
+            std::function<void(const std::filesystem::path&)> _onRenamed;
 
             // Only the current "fray_state_<hex of Fray>" table (key, type, value) counts as a Fray database.
             static bool looksLikeFrayDatabase(
@@ -428,7 +430,7 @@ namespace fray
                 _watcher.watch(current);
                 log::engineInfo("Project renamed from %s to %s.", oldName.c_str(), newName.c_str());
                 if (_onRenamed)
-                    _onRenamed(oldName, newName);
+                    _onRenamed(current);
                 return result;
             }
 
@@ -662,7 +664,7 @@ namespace fray
             }
 
             void setRenameCallback(
-                std::function<void(const std::string&, const std::string&)> callback)
+                std::function<void(const std::filesystem::path&)> callback)
             {
                 std::lock_guard<std::recursive_mutex> lock(_mutex);
                 _onRenamed = std::move(callback);
@@ -785,6 +787,10 @@ namespace fray
                 }
                 return _states.at("Fray")->get(key, value);
             }
+
+            F_err handleProjectMessage(
+                const ProjectCloseRequest& request,
+                bool& packaged);
 
             F_err close(
                 bool forcePackage = false,

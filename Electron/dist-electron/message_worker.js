@@ -11,7 +11,6 @@ const SELF = ProcessKind.PROCESS_KIND_ELECTRON_MAIN;
 const parent = node_worker_threads.parentPort;
 const networkPort = node_worker_threads.workerData.port;
 let invalid = false;
-let monitorTimer;
 const frames = frame_builder.createFrameBuilder(SELF, 2, message.buildFrame, message.processName);
 let heartbeat = 0;
 let processedCount = 0;
@@ -60,6 +59,19 @@ const monitor = new neighbor_monitor.NeighborMonitor(
     }
   }
 );
+monitor.start(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
+const monitorTimer = setInterval(() => {
+  outgoing.sweep();
+  monitor.tick();
+}, 1e3);
+monitorTimer.unref();
+function networkEnded() {
+  const engine = ProcessKind.PROCESS_KIND_ENGINE;
+  if (outgoing.state(engine) === "unreachable") return;
+  outgoing.setState(engine, "unreachable");
+  outgoing.discardQueue(engine);
+  parent.postMessage({ type: "peer-unavailable", kind: engine });
+}
 function forward(destination, bytes, broadcast) {
   parent.postMessage({ type: "forward", destination, frame: bytes, broadcast }, [bytes]);
 }
@@ -162,19 +174,11 @@ function routeFrame(bytes, source) {
 networkPort.on("message", (event) => {
   if (event.type === "connected") {
     monitor.start(ProcessKind.PROCESS_KIND_ENGINE);
-    monitor.start(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
-    monitorTimer = setInterval(() => {
-      outgoing.sweep();
-      monitor.tick();
-    }, 1e3);
-    monitorTimer.unref();
     return;
   }
   if (event.type === "end") {
-    clearInterval(monitorTimer);
-    outgoing.markNotReady(ProcessKind.PROCESS_KIND_ENGINE);
+    networkEnded();
     networkPort.close();
-    parent.close();
     return;
   }
   if (event.type === "frame" && !invalid) routeFrame(event.frame, "network");
@@ -186,8 +190,10 @@ parent.on("message", (event) => {
     heartbeat = event.heartbeat;
   } else if (event.type === "not-ready") {
     outgoing.markNotReady(event.kind);
-    if (event.kind === ProcessKind.PROCESS_KIND_ELECTRON_RENDERER && monitorTimer)
+    if (event.kind === ProcessKind.PROCESS_KIND_ELECTRON_RENDERER)
       monitor.start(event.kind);
+  } else if (event.type === "network-ended") {
+    networkEnded();
   } else if (event.type === "shutdown") {
     clearInterval(monitorTimer);
     networkPort.close();

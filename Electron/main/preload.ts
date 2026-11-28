@@ -27,13 +27,23 @@ const frayBridge: FrayBridge = {
     ipcRenderer.on('fray:new-project', listener);
     return () => ipcRenderer.removeListener('fray:new-project', listener);
   },
-  chooseNewProjectPath: (previousPath) => ipcRenderer.invoke('fray:choose-new-project-path', previousPath),
+  chooseNewProjectPath: (previousPath) => ipcRenderer.send('fray:choose-new-project-path', previousPath),
+  onNewProjectPath: (handler) => {
+    const listener = (_event: unknown, result: Parameters<typeof handler>[0]) => handler(result);
+    ipcRenderer.on('fray:new-project-path', listener);
+    return () => ipcRenderer.removeListener('fray:new-project-path', listener);
+  },
   onOpenProject: (handler) => {
     const listener = () => handler();
     ipcRenderer.on('fray:open-project', listener);
     return () => ipcRenderer.removeListener('fray:open-project', listener);
   },
-  chooseOpenProjectPath: (kind) => ipcRenderer.invoke('fray:choose-open-project-path', kind),
+  chooseOpenProjectPath: (kind) => ipcRenderer.send('fray:choose-open-project-path', kind),
+  onOpenProjectPath: (handler) => {
+    const listener = (_event: unknown, result: Parameters<typeof handler>[0]) => handler(result);
+    ipcRenderer.on('fray:open-project-path', listener);
+    return () => ipcRenderer.removeListener('fray:open-project-path', listener);
+  },
   onCloseProject: (handler) => {
     const listener = (_event: unknown, packageProject: boolean) => handler(packageProject);
     ipcRenderer.on('fray:close-project', listener);

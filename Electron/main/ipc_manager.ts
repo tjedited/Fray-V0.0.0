@@ -235,8 +235,14 @@ export class IPCManager extends EventEmitter<IPCManagerEvents> {
         for (const [name, worker] of workers) {
             worker.on('exit', () => {
                 if (!this.closing) {
-                    log.electronWarn('Thread %s stopped; closing IPC.', name);
-                    this.close();
+                    if (name === 'network') {
+                        this.connected = false;
+                        this.router.postMessage({ type: 'network-ended' });
+                        log.electronWarn('Network thread stopped; Main and Renderer routing remains available.');
+                    } else {
+                        log.electronWarn('Thread %s stopped; closing IPC.', name);
+                        void this.close();
+                    }
                 }
             });
         }
@@ -273,9 +279,7 @@ export class IPCManager extends EventEmitter<IPCManagerEvents> {
 
     private async stop(finalFrame: Buffer | null): Promise<void> {
         this.network.postMessage({ type: 'shutdown', frame: this.connected ? finalFrame : null });
-        // Also stop the router if the network worker has already exited.
-        if (!this.threads.runningNames().includes('network'))
-            this.router.postMessage({ type: 'shutdown' });
+        this.router.postMessage({ type: 'shutdown' });
         let timer: NodeJS.Timeout | undefined;
         const timeout = new Promise<boolean>((resolve) => {
             timer = setTimeout(() => resolve(false), 1000);

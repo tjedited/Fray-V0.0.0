@@ -2,7 +2,6 @@
 Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 const electron = require("electron");
 const path = require("node:path");
-const promises = require("node:fs/promises");
 const log_manager = require("./log_manager.js");
 const ipc_manager = require("./ipc_manager.js");
 const thread_manager = require("./thread_manager.js");
@@ -39,10 +38,19 @@ let window = null;
 let rendererState = "starting";
 let rendererThreads = [];
 let rendererShutdownRequested = false;
-let resolveRendererStopped;
-const rendererStopped = new Promise((resolve) => {
-  resolveRendererStopped = resolve;
-});
+let rendererShutdownFinished = false;
+let ipcShutdownFinished = false;
+let rendererShutdownTimer;
+function finishShutdown() {
+  if (!shuttingDown || !rendererShutdownFinished || !ipcShutdownFinished || shutdownComplete) return;
+  shutdownComplete = true;
+  electron.app.quit();
+}
+function finishRendererShutdown() {
+  rendererShutdownFinished = true;
+  clearTimeout(rendererShutdownTimer);
+  finishShutdown();
+}
 function send(frame) {
   if (!ipc || shuttingDown) {
     log_manager.electronWarn("Cannot send: IPC is not available.");
@@ -54,11 +62,12 @@ function send(frame) {
     log_manager.electronWarn("Cannot send: %s", error.message);
   }
 }
-const messages = message_handler.createMessageHandler(frames, send, () => ipc?.connected === true && !shuttingDown, (frame) => {
-  if (!ipc || shuttingDown || !ipc.connected) throw new Error("Cannot send prompt: IPC is not available.");
+const messages = message_handler.createMessageHandler(frames, send, (frame) => {
+  if (!ipc || shuttingDown) throw new Error("Cannot send prompt: IPC is not available.");
   ipc.send(frame);
-});
+}, () => window, () => shuttingDown);
 const requestPrompt = messages.requestPrompt;
+const takePromptResult = messages.takePromptResult;
 function connectToEngine() {
   if (!enginePort) {
     log_manager.electronError("FRAY_ENGINE_PORT is not set; start Electron through the engine.");
@@ -113,41 +122,8 @@ electron.ipcMain.on("fray:frame", (event, frame) => {
     log_manager.electronError("Cannot route renderer frame: %s", error.message);
   }
 });
-electron.ipcMain.handle("fray:choose-new-project-path", async (event, previousPath) => {
-  if (!window || window.isDestroyed() || event.sender !== window.webContents || shuttingDown)
-    throw new Error("Cannot choose a project path from this renderer.");
-  if (previousPath !== void 0 && (typeof previousPath !== "string" || !path__namespace.isAbsolute(previousPath) || previousPath.includes("\0")))
-    throw new Error("Cannot choose a project path: invalid previous path.");
-  const result = await electron.dialog.showSaveDialog(window, {
-    title: "New Project",
-    buttonLabel: "Create Project",
-    defaultPath: previousPath === void 0 ? void 0 : path__namespace.dirname(previousPath)
-  });
-  if (result.canceled || !result.filePath) return null;
-  return result.filePath.endsWith(".fry") ? result.filePath.slice(0, -4) : result.filePath;
-});
-electron.ipcMain.handle("fray:choose-open-project-path", async (event, kind) => {
-  if (!window || window.isDestroyed() || event.sender !== window.webContents || shuttingDown)
-    throw new Error("Cannot choose a project from this renderer.");
-  if (kind !== "archive" && kind !== "folder" && !(kind === "both" && process.platform === "darwin"))
-    throw new Error("Cannot choose a project: invalid picker type.");
-  const properties = kind === "both" ? ["openFile", "openDirectory"] : [kind === "archive" ? "openFile" : "openDirectory"];
-  const result = await electron.dialog.showOpenDialog(window, {
-    title: "Open Project",
-    properties,
-    ...kind === "folder" ? {} : { filters: [{ name: "Fray projects", extensions: ["fry"] }] }
-  });
-  if (result.canceled) return null;
-  const selected = result.filePaths[0];
-  if (!selected || !path__namespace.isAbsolute(selected) || selected.includes("\0"))
-    throw new Error("The selected project path is invalid.");
-  const status = await promises.lstat(selected);
-  if (status.isDirectory() && kind !== "archive")
-    return { path: selected, kind: "folder" };
-  if (status.isFile() && kind !== "folder" && path__namespace.extname(selected) === ".fry")
-    return { path: selected.slice(0, -4), kind: "archive" };
-  throw new Error("Select a working folder or a .fry project archive.");
-});
+electron.ipcMain.on("fray:choose-new-project-path", messages.onChooseNewProjectPath);
+electron.ipcMain.on("fray:choose-open-project-path", messages.onChooseOpenProjectPath);
 electron.ipcMain.on("fray:renderer-state", (event, report) => {
   if (!window || event.sender !== window.webContents) {
     log_manager.electronError("Rejected state from an unknown renderer.");
@@ -165,12 +141,12 @@ electron.ipcMain.on("fray:renderer-state", (event, report) => {
       log_manager.electronError("Renderer reported stopped with threads still running: %s.", rendererThreads.join(", "));
       rendererState = "failed";
     } else {
-      resolveRendererStopped();
+      finishRendererShutdown();
     }
   }
   if (rendererState === "failed" && shuttingDown && rendererThreads.length === 0) {
     log_manager.electronError("Renderer threads stopped after a failure; shutdown was not clean.");
-    resolveRendererStopped();
+    finishRendererShutdown();
   }
   if (shuttingDown) requestRendererShutdown();
 });
@@ -211,7 +187,7 @@ const createWindow = () => {
     log_manager.electronError("Renderer process exited (%s); its threads could not report a clean shutdown.", details.reason);
     rendererState = "gone";
     ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
-    resolveRendererStopped();
+    finishRendererShutdown();
   });
   win.webContents.on("did-start-navigation", (_event, _url, isSameDocument, isMainFrame) => {
     if (!isMainFrame || isSameDocument) return;
@@ -222,12 +198,13 @@ const createWindow = () => {
     ipc?.markNotReady(ProcessKind.PROCESS_KIND_ELECTRON_RENDERER);
     rendererThreads = [];
     rendererShutdownRequested = false;
+    rendererShutdownFinished = false;
   });
   win.on("closed", () => {
     if (rendererState !== "stopped" && rendererState !== "gone") {
       log_manager.electronError("Renderer window was destroyed before its threads reported a clean shutdown.");
       rendererState = "gone";
-      resolveRendererStopped();
+      finishRendererShutdown();
     }
   });
   win.webContents.on("did-fail-load", (_event, code, description, _url, isMainFrame) => {
@@ -236,7 +213,7 @@ const createWindow = () => {
     showWindow();
     if (rendererState === "starting" && rendererThreads.length === 0) {
       rendererState = "gone";
-      resolveRendererStopped();
+      finishRendererShutdown();
     }
   });
   win.loadURL("http://localhost:5173");
@@ -248,13 +225,22 @@ electron.app.on("before-quit", (event) => {
   if (shuttingDown) return;
   shuttingDown = true;
   messages.cancelPrompts();
-  if (!window) resolveRendererStopped();
+  if (!window || window.isDestroyed() || rendererState === "stopped" || rendererState === "gone")
+    finishRendererShutdown();
   if (rendererState === "failed" && rendererThreads.length === 0) {
     log_manager.electronError("Renderer threads stopped after a failure; shutdown was not clean.");
-    resolveRendererStopped();
+    finishRendererShutdown();
+  }
+  if (!rendererShutdownFinished) {
+    rendererShutdownTimer = setTimeout(() => {
+      log_manager.electronError("Renderer did not shut down within 1000ms; forcing the window closed.");
+      rendererState = "gone";
+      if (window && !window.isDestroyed()) window.destroy();
+      finishRendererShutdown();
+    }, 1e3);
   }
   requestRendererShutdown();
-  rendererStopped.then(() => {
+  Promise.resolve().then(() => {
     if (!ipc) return;
     let finalFrame = null;
     if (ipc.connected) {
@@ -265,8 +251,8 @@ electron.app.on("before-quit", (event) => {
   }).catch((err) => {
     log_manager.electronError("Failed to stop IPC threads: %s", err.message);
   }).finally(() => {
-    shutdownComplete = true;
-    electron.app.quit();
+    ipcShutdownFinished = true;
+    finishShutdown();
   });
 });
 electron.app.whenReady().then(() => {
@@ -325,4 +311,5 @@ electron.app.on("window-all-closed", () => {
   electron.app.quit();
 });
 exports.requestPrompt = requestPrompt;
+exports.takePromptResult = takePromptResult;
 //# sourceMappingURL=main.js.map

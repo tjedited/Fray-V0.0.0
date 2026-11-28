@@ -10,14 +10,19 @@ Put each function parameter on its own line after the opening parenthesis.
 The Engine launches Electron. Each process uses its own built-in message router; Main does not register one. The
 Engine router delivers application messages directly to its FrayManager. Electron
 process-specific code lives in `Electron/main/` and `Electron/renderer/`.
+Engine application commands are handled in `fray_message_handler.hpp`; Close
+and Package requests are handled in `project_message_handler.hpp` and executed
+on the selected project's queue. Other project-targeted commands are not yet
+generally dispatched.
 Main owns a thread manager and separate network and message workers. Its message
 worker reads the prefix and forwards renderer-bound frames without decoding the
 header. Renderer-originated frames can be routed to Main or forwarded to the
 Engine. The narrow preload bridge carries frames across Electron IPC; the
 renderer has its own thread manager, message worker and router, and decodes
-headers for local messages. Main and renderer application message handling live
-in their respective `message_handler.ts` files. React plug-in dispatch is not
-yet implemented. Renderer console messages are forwarded to the terminal by Main.
+headers for local messages. Main and renderer application message handling,
+including prompts, project actions and native-dialog requests, lives in their
+respective `message_handler.ts` files. React plug-in dispatch is not yet
+implemented. Renderer console messages are forwarded to the terminal by Main.
 
 ### Building frames
 
@@ -39,10 +44,13 @@ sequence. The Engine uses its process-wide atomic counter.
 Engine, Electron Main, and renderer code can request a user prompt asynchronously.
 Requests carry a title, optional description, buttons, and an optional dismissible
 flag (default true). Responses are correlated to the request ID and report a
-choice, dismissal, or error. Engine callbacks run on its application thread.
-Use `FrayManager::requestPrompt` in the Engine, `requestPrompt` in Electron Main,
-or `usePromptMessages` in renderer components. Prompts are non-modal, draggable,
-and shown one at a time.
+choice, dismissal, or error. Each process stores the result in its own state;
+requesting a prompt does not register a response callback. Use
+`FrayManager::requestPrompt` and `takePromptResponse` in the Engine,
+`requestPrompt` and `takePromptResult` in Electron Main, or `usePromptMessages`
+in renderer components. Prompts are non-modal, draggable, and shown one at a time.
+Sending a command does not imply delivery or execution, and senders do not
+wait for acknowledgments. A later message can update local state independently.
 
 File > New Project opens a native save dialog to choose a project name and
 location; the Engine creates a working folder there, not a file at the selected
@@ -51,8 +59,7 @@ choose another name. Choosing another name reopens the picker in the same folder
 If both exist, choose which to open; the other is renamed.
 The Engine rechecks conflicts, validates existing databases, and reports success
 or failure through notifications. Native save-dialog behavior varies by OS and
-may include its own overwrite confirmation. An already-open project with the
-same name cannot currently be opened from another directory.
+may include its own overwrite confirmation.
 
 File > Open Project selects a `.fry` archive or working folder. On platforms
 that cannot select files and folders in one dialog, choose which kind first.
@@ -111,15 +118,16 @@ can ask with `COMMAND_REQUEST_READY`. Both are sent to the broadcast destination
 - Queues have no size limit yet. A queue is discarded with `discardQueue` when a
   monitored neighbor is declared down or unreachable. Messages wait again when
   a neighbor is suspect or merely stops being ready.
-- Main is ready when it is connected to the Engine and announces itself then.
-  The renderer's only route to the others is Main, so it announces itself when it
-  hears that Main is ready. This is what makes either start order work.
+- Main announces itself on connection and answers Renderer readiness independently
+  of the Engine link. Renderer announces itself when its own worker is ready;
+  it also re-announces when Main requests readiness after a connection. Main's
+  router continues serving the renderer if the Engine connection closes.
 - The Engine never relays. Main delivers a broadcast to itself, the renderer and
   the Engine, except to the sender.
 - Not yet implemented: a "stopping" announcement, and clearing the Engine's
   table immediately when a connection drops. The Engine detects silence through
-  its monitoring timer; Main clears its entries for the Engine and renderer on
-  disconnect, navigation or shutdown.
+  its monitoring timer; Main clears the Engine entry on disconnect and the
+  renderer entry on navigation or shutdown.
 
 Each router monitors its currently implemented immediate neighbors: Engine
 monitors Main, Main monitors Engine and the renderer, and the renderer monitors
@@ -153,19 +161,19 @@ supervisor are also deferred.
 
 Renderer thread state and readiness are reported to Main. Frames for the
 renderer wait in Main's outgoing queue until it says it is ready. On a normal window
-close or app quit, Main requests renderer shutdown and waits for its registered
-workers to acknowledge shutdown before stopping its own IPC workers and sending
-the Engine a framed quit. Web Workers have no join API: the renderer terminates
+close or app quit, Main requests renderer shutdown and independently sends
+the Engine a framed quit while stopping its own IPC workers. The renderer has
+one second to report that its workers stopped; otherwise Main logs the failure
+and forces the window closed. Web Workers have no join API: the renderer terminates
 each worker after its shutdown acknowledgement. A failed worker, renderer crash
-or forced window destruction is reported as an unclean shutdown. A worker that
-does not acknowledge shutdown keeps the app waiting. Reload or navigation
+or forced window destruction is reported as an unclean shutdown. Reload or navigation
 currently destroys renderer workers without coordinating shutdown and is logged;
 coordinated reload remains future work.
 
 Frames contain a fixed 23-byte routing prefix, a protobuf header and opaque
 payload bytes. Routing supports one renderer at destination ID 0; nonzero
 renderer IDs and other unsupported destinations are logged and dropped.
-Engine quit handling is in its router; Engine forwarding, plug-in routing,
+Engine quit handling is in its application message handler; Engine forwarding, plug-in routing,
 multi-window mapping and deduplication are not yet implemented. The current transport broadcasts Engine sends to connected
 clients. Renderer-to-Main routing currently requires the Engine IPC workers to
 be running. Electron IPC and preload may copy frame data; this has not yet been
@@ -278,6 +286,12 @@ ERR(project.get("project.info.name", name));
 ERR(project.get("project.info.projectVersion.major", major));
 ERR(project.close());
 ```
+
+Open projects are identified by their normalized working-folder paths, so
+projects with the same name can be open in different directories. Lookup and
+close operations accept a full folder or `.fry` path, or a short project name
+when it is unique. An ambiguous short name reports an error. When a project is
+renamed, its path key follows the working folder.
 
 `project.info.name` is initialized from the archive or folder name when absent.
 Each project owns a file manager and one or more state managers. The default

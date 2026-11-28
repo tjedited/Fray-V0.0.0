@@ -45,7 +45,7 @@ namespace fray
     X(FAILED_SAVE_PROJECT, "Failed to save the project.") \
     X(FAILED_CLOSE_PROJECT, "Failed to close the project.") \
     X(PROJECT_CONFLICT, "Both the project archive and working folder exist.") \
-    X(PROJECT_ALREADY_OPEN, "A project with this name is already open.") \
+    X(PROJECT_ALREADY_OPEN, "This project is already open.") \
     X(DATABASE_CONFLICT, "Multiple database files could be the project database.") \
     X(FAILED_RENAME_PROJECT, "Failed to rename the project.") \
     X(FAILED_SPAWN_PROCESS, "Failed to spawn the process.") \
@@ -57,7 +57,8 @@ namespace fray
     X(PROJECT_BOTH_EXIST, "A project folder and archive already exist.") \
     X(PROJECT_NOT_FOUND, "The selected project does not exist.") \
     X(INVALID_PROJECT_DATABASE, "The selected project has no valid Fray database.") \
-    X(PROJECT_DATABASE_OCCUPIED, "A project database path is already occupied.")
+    X(PROJECT_DATABASE_OCCUPIED, "A project database path is already occupied.") \
+    X(PROJECT_AMBIGUOUS, "Multiple open projects have this name; use the full path.")
 
         enum code : F_err
         {

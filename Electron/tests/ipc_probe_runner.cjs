@@ -105,6 +105,29 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', as
             console.error(`PROBE_ERROR:${error.message}`);
             app.exit(1);
         }
+    } else if (command.startsWith('close-target ')) {
+        const target = Buffer.from(command.slice('close-target '.length), 'base64').toString('utf8');
+        try {
+            const result = await contents.executeJavaScript(`Promise.all([
+                import('/message_handler.ts'), import('/message.ts'), import('/message_schema.ts')
+            ]).then(([{ createMessageHandler }, { parseFrame, Command }, { ProjectCloseResult }]) => new Promise((resolve, reject) => {
+                const timer = setTimeout(() => { remove(); reject(new Error('Project close result timed out')); }, 8000);
+                const handler = createMessageHandler((frame) => window.frayBridge.sendFrame(frame), () => {});
+                const remove = window.frayBridge.onFrame((frame) => {
+                    const incoming = parseFrame(frame);
+                    if (incoming.prefix.commandId !== Command.COMMAND_PROJECT_CLOSE_RESULT) return;
+                    clearTimeout(timer);
+                    remove();
+                    const result = ProjectCloseResult.decode(incoming.payload);
+                    resolve({ success: result.success, error: result.error });
+                });
+                handler.closeProject(false, ${JSON.stringify(target)});
+            }))`);
+            console.log(`CLOSE_TARGET_RESULT:${JSON.stringify({ target, ...result })}`);
+        } catch (error) {
+            console.error(`PROBE_ERROR:${error.message}`);
+            app.exit(1);
+        }
     } else if (command.startsWith('open-project ')) {
         const name = Buffer.from(command.slice('open-project '.length), 'base64').toString('utf8');
         try {

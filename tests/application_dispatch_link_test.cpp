@@ -1,4 +1,5 @@
-#include "fray/fray_manager_message.hpp"
+#include "fray/project_message_handler.hpp"
+#include "fray/fray_message_handler.hpp"
 
 void dispatchFromOtherTranslationUnit(fray::FrayManager& app, const fray::message::InData& incoming,
                                       fray::ipc::IPCManager& ipc)

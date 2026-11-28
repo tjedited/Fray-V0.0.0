@@ -84,25 +84,32 @@ int main()
     auto* button = request.add_buttons();
     button->set_label("Yes");
     button->set_value("yes");
-    std::promise<fray::PromptResponse> completed;
-    auto completion = completed.get_future();
-    assert(app.requestPrompt(*ipc, request, [&](const fray::PromptResponse& result) { completed.set_value(result); }));
+    uint64_t requestId = 0;
+    assert(app.requestPrompt(*ipc, request, requestId));
     const auto sent = readPrompt(socket);
     assert(sent.prefix.destinationKind == fray::PROCESS_KIND_ELECTRON_RENDERER);
+    assert(sent.header.message_id() == requestId);
     fray::PromptResponse response;
-    response.set_request_id(sent.header.message_id());
+    response.set_request_id(requestId);
     response.set_value("invalid");
     sendFrame(socket, fray::COMMAND_PROMPT_RESPONSE, response.SerializeAsString());
-    assert(completion.wait_for(100ms) == std::future_status::timeout);
+    std::this_thread::sleep_for(100ms);
+    fray::PromptResponse result;
+    assert(!app.takePromptResponse(requestId, result));
     response.set_value("yes");
     sendFrame(socket, fray::COMMAND_PROMPT_RESPONSE, response.SerializeAsString());
-    assert(completion.wait_for(5s) == std::future_status::ready);
-    assert(completion.get().value() == "yes");
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!app.takePromptResponse(requestId, result))
+    {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(10ms);
+    }
+    assert(result.value() == "yes");
+    assert(!app.takePromptResponse(requestId, result));
 
-    std::promise<fray::PromptResponse> cancelled;
-    auto cancellation = cancelled.get_future();
-    assert(app.requestPrompt(*ipc, request, [&](const fray::PromptResponse& result) { cancelled.set_value(result); }));
+    uint64_t cancelledId = 0;
+    assert(app.requestPrompt(*ipc, request, cancelledId));
     ipc.reset();
-    assert(cancellation.wait_for(5s) == std::future_status::ready);
-    assert(cancellation.get().error() == "Application is shutting down.");
+    assert(app.takePromptResponse(cancelledId, result));
+    assert(result.error() == "Application is shutting down.");
 }

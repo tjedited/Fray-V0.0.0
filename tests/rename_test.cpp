@@ -375,6 +375,33 @@ int main(int argc, char** argv)
         assert(fs::is_regular_file(root / "P1" / "P1.sqlite") && fs::is_regular_file(root / "P3" / "P3.sqlite"));
     }
 
+    // Path keys remain distinct when a project is renamed to another open project's name.
+    {
+        fs::create_directories(root / "identity-a");
+        fs::create_directories(root / "identity-b");
+        const auto first = root / "identity-a" / "First";
+        const auto renamed = root / "identity-a" / "Shared";
+        const auto second = root / "identity-b" / "Shared";
+        fray::FrayManager app;
+        assert(app.openProject(first.string()).get() == fray::errors::NONE);
+        assert(app.openProject(second.string()).get() == fray::errors::NONE);
+        auto& project = app.project(first.string());
+        assert(project.rename("Shared") == fray::errors::NONE);
+        assert(&app.project(renamed.string()) == &project);
+        assert(&app.project(second.string()) != &project);
+        bool ambiguous = false;
+        try { (void)app.project("Shared"); }
+        catch (const std::invalid_argument&) { ambiguous = true; }
+        assert(ambiguous);
+        const auto watched = root / "identity-a" / "Watched";
+        fs::rename(renamed, watched);
+        assert(waitFor([&] { return projectIsOpen(app, watched.string()); }));
+        assert(&app.project(watched.string()) == &project);
+        assert(&app.project("Shared") == &app.project(second.string()));
+        assert(app.closeProject(watched.string()) == fray::errors::NONE);
+        assert(app.closeProject(second.string()) == fray::errors::NONE);
+    }
+
     // FileWatcher on its own.
     {
         const fs::path folder = root / "Plain";

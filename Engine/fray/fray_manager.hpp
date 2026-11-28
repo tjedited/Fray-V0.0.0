@@ -8,6 +8,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -31,7 +32,7 @@ namespace fray
         private:
             struct Entry
             {
-                std::unique_ptr<ProjectManager> project;
+                std::shared_ptr<ProjectManager> project;
                 std::shared_ptr<threads::TaskQueue> queue;
                 threads::ThreadManager::Id thread = 0;
             };
@@ -44,13 +45,15 @@ namespace fray
             std::shared_ptr<threads::TaskQueue> _applicationQueue = std::make_shared<threads::TaskQueue>();
             bool _shutdown = false;
             std::mutex _mutex;
-            std::unordered_map<std::string, Entry> _projects;
+            using Projects = std::unordered_map<std::string, Entry>;
+            Projects _projects;
             std::vector<ProjectManager*> _openOrder;
             std::unordered_set<ProjectManager*> _closingProjects;
             struct PendingPrompt
             {
                 PromptRequest request;
-                std::function<void(const PromptResponse&)> callback;
+                PromptResponse response;
+                bool completed = false;
             };
             std::mutex _promptMutex;
             std::unordered_map<uint64_t, PendingPrompt> _pendingPrompts;
@@ -82,12 +85,78 @@ namespace fray
                 }
             }
 
-            Entry* find(
-                const std::string& name)
+            static std::string projectKey(
+                const std::string& path,
+                std::error_code& error)
+            {
+                if (path.empty() || path.find('\0') != std::string::npos)
+                {
+                    error = std::make_error_code(std::errc::invalid_argument);
+                    return {};
+                }
+                auto resolved = std::filesystem::weakly_canonical(path, error);
+                if (error)
+                    return {};
+                if (resolved.filename().empty() && resolved != resolved.root_path())
+                    resolved = resolved.parent_path();
+                if (resolved.extension() == ".fry")
+                    resolved.replace_extension();
+                return resolved.string();
+            }
+
+            // Caller holds _mutex. A bare name is accepted only when exactly one active project matches.
+            Projects::iterator lookup(
+                const std::string& target,
+                F_err& error,
+                bool includeClosed = false)
+            {
+                error = errors::PROJECT_NOT_FOUND;
+                const std::filesystem::path input(target);
+                if (input.is_absolute() || input.has_parent_path())
+                {
+                    std::error_code pathError;
+                    const std::string key = projectKey(target, pathError);
+                    if (pathError)
+                    {
+                        log::engineError("Cannot resolve project path: %s", pathError.message().c_str());
+                        return _projects.end();
+                    }
+                    auto found = _projects.find(key);
+                    if (found != _projects.end() &&
+                        (includeClosed || found->second.project->isOpen() || found->second.project->isOpening()))
+                    {
+                        error = errors::NONE;
+                        return found;
+                    }
+                    return _projects.end();
+                }
+                auto match = _projects.end();
+                for (auto it = _projects.begin(); it != _projects.end(); ++it)
+                {
+                    if (std::filesystem::path(it->first).filename() != input ||
+                        (!includeClosed && !it->second.project->isOpen() && !it->second.project->isOpening()))
+                        continue;
+                    if (match != _projects.end())
+                    {
+                        error = errors::PROJECT_AMBIGUOUS;
+                        log::engineError("Multiple projects are named %s; use the full path.", target.c_str());
+                        return _projects.end();
+                    }
+                    match = it;
+                }
+                if (match != _projects.end())
+                    error = errors::NONE;
+                return match;
+            }
+
+            std::optional<Entry> find(
+                const std::string& name,
+                F_err& error,
+                bool includeClosed = false)
             {
                 std::lock_guard<std::mutex> lock(_mutex);
-                const auto found = _projects.find(name);
-                return found == _projects.end() ? nullptr : &found->second;
+                const auto found = lookup(name, error, includeClosed);
+                return found == _projects.end() ? std::nullopt : std::optional<Entry>(found->second);
             }
 
             void retire(
@@ -107,27 +176,49 @@ namespace fray
                 ProjectManager* project)
             {
                 std::lock_guard<std::mutex> lock(_mutex);
+                const auto found = std::find_if(_projects.begin(), _projects.end(),
+                    [project](const auto& entry) { return entry.second.project.get() == project; });
+                if (found == _projects.end() || !project->isOpen())
+                    return;
                 forgetProject(project);
                 _openOrder.push_back(project);
             }
 
             void rekey(
-                const std::string& oldName,
-                const std::string& newName)
+                ProjectManager* project,
+                const std::filesystem::path& path)
             {
-                std::lock_guard<std::mutex> lock(_mutex);
-                auto node = _projects.extract(oldName);
-                if (node.empty())
-                    return;
-                if (_projects.count(newName) != 0)
+                std::error_code error;
+                const std::string key = projectKey(path.string(), error);
+                if (error)
                 {
-                    log::engineError("A project named %s is already registered; %s keeps its old name here.",
-                                     newName.c_str(), oldName.c_str());
-                    _projects.insert(std::move(node));
+                    log::engineError("Cannot update renamed project path: %s", error.message().c_str());
                     return;
                 }
-                node.key() = newName;
-                _projects.insert(std::move(node));
+                Entry stale;
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    auto found = std::find_if(_projects.begin(), _projects.end(),
+                        [project](const auto& entry) { return entry.second.project.get() == project; });
+                    if (found == _projects.end() || found->first == key)
+                        return;
+                    const auto collision = _projects.find(key);
+                    if (collision != _projects.end())
+                    {
+                        if (collision->second.project->isOpen() || collision->second.project->isOpening())
+                        {
+                            log::engineError("Cannot register renamed project: %s is already open.", key.c_str());
+                            return;
+                        }
+                        stale = std::move(collision->second);
+                        _projects.erase(collision);
+                    }
+                    auto node = _projects.extract(found);
+                    node.key() = key;
+                    _projects.insert(std::move(node));
+                }
+                if (stale.queue)
+                    retire(stale);
             }
 
             void init()
@@ -210,23 +301,31 @@ namespace fray
                 const std::string& reason,
                 bool closing = false)
             {
-                std::unordered_map<uint64_t, PendingPrompt> prompts;
+                std::lock_guard<std::mutex> lock(_promptMutex);
+                if (closing)
+                    _promptClosing = true;
+                for (auto& entry : _pendingPrompts)
                 {
-                    std::lock_guard<std::mutex> lock(_promptMutex);
-                    if (closing)
-                        _promptClosing = true;
-                    prompts.swap(_pendingPrompts);
+                    if (entry.second.completed)
+                        continue;
+                    entry.second.response.set_request_id(entry.first);
+                    entry.second.response.set_dismissed(true);
+                    entry.second.response.set_error(reason);
+                    entry.second.completed = true;
                 }
-                for (auto& entry : prompts)
-                {
-                    PromptResponse response;
-                    response.set_request_id(entry.first);
-                    response.set_dismissed(true);
-                    response.set_error(reason);
-                    if (!_applicationQueue->post([callback = std::move(entry.second.callback), response]
-                        { callback(response); }))
-                        log::engineError("Cannot report prompt cancellation: application thread is shutting down.");
-                }
+            }
+
+            bool takePromptResponse(
+                uint64_t requestId,
+                PromptResponse& response)
+            {
+                std::lock_guard<std::mutex> lock(_promptMutex);
+                const auto found = _pendingPrompts.find(requestId);
+                if (found == _pendingPrompts.end() || !found->second.completed)
+                    return false;
+                response = std::move(found->second.response);
+                _pendingPrompts.erase(found);
+                return true;
             }
 
             const std::string& applicationId() const { return _applicationId; }
@@ -243,7 +342,7 @@ namespace fray
             bool requestPrompt(
                 ipc::IPCManager& ipc,
                 const PromptRequest& request,
-                std::function<void(const PromptResponse&)> callback);
+                uint64_t& requestId);
 
             // Starts opening a project on its own thread. The optional completion runs on that thread,
             // or on the caller for an immediate failure. Conflict cancellation is opt-in for callers
@@ -268,22 +367,20 @@ namespace fray
                     return ready(errors::FAILED_OPEN_PROJECT);
                 }
                 std::error_code error;
-                auto resolved = std::filesystem::weakly_canonical(path, error);
+                const std::string key = projectKey(path, error);
                 if (error)
                 {
                     log::engineError("Cannot resolve project path: %s", error.message().c_str());
                     if (completion) completion(errors::FAILED_OPEN_PROJECT);
                     return ready(errors::FAILED_OPEN_PROJECT);
                 }
-                if (resolved.filename().empty() && resolved != resolved.root_path())
-                    resolved = resolved.parent_path();
-                const std::string name = resolved.extension() == ".fry"
-                    ? resolved.stem().string() : resolved.filename().string();
                 Entry stale;
                 bool alreadyOpen = false;
+                ProjectManager* project = nullptr;
+                std::shared_ptr<threads::TaskQueue> queue;
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
-                    const auto found = _projects.find(name);
+                    const auto found = _projects.find(key);
                     if (found != _projects.end())
                     {
                         if (found->second.project->isOpen() || found->second.project->isOpening())
@@ -295,31 +392,32 @@ namespace fray
                             _projects.erase(found);
                         }
                     }
+                    if (!alreadyOpen)
+                    {
+                        Entry entry;
+                        entry.project = std::make_shared<ProjectManager>();
+                        entry.queue = std::make_shared<threads::TaskQueue>();
+                        project = entry.project.get();
+                        queue = entry.queue;
+                        project->beginOpening();
+                        project->setRenameCallback([this, project](const std::filesystem::path& renamed)
+                                                   { rekey(project, renamed); });
+                        entry.thread = _threads->spawn("project:" + key, [queue, project](threads::StopToken)
+                        {
+                            queue->run([project] { return project->hasThreads(); });
+                        });
+                        _projects.emplace(key, std::move(entry));
+                    }
                 }
                 if (alreadyOpen)
                 {
-                    log::engineError("Project is already open: %s", name.c_str());
+                    log::engineError("Project is already open: %s", key.c_str());
                     if (completion) completion(errors::PROJECT_ALREADY_OPEN);
                     return ready(errors::PROJECT_ALREADY_OPEN);
                 }
                 if (stale.queue)
                     retire(stale);
 
-                Entry entry;
-                entry.project = std::make_unique<ProjectManager>();
-                entry.queue = std::make_shared<threads::TaskQueue>();
-                ProjectManager* project = entry.project.get();
-                std::shared_ptr<threads::TaskQueue> queue = entry.queue;
-                project->beginOpening();
-                project->setRenameCallback([this](const std::string& from, const std::string& to) { rekey(from, to); });
-                entry.thread = _threads->spawn("project:" + name, [queue, project](threads::StopToken)
-                {
-                    queue->run([project] { return project->hasThreads(); });
-                });
-                {
-                    std::lock_guard<std::mutex> lock(_mutex);
-                    _projects.emplace(name, std::move(entry));
-                }
                 return queue->call([this, project, queue, path, choice, completion = std::move(completion),
                                     cancelOnDatabaseConflict, mode]
                 {
@@ -344,7 +442,10 @@ namespace fray
             std::vector<std::string> databaseCandidates(
                 const std::string& name)
             {
-                Entry* entry = find(name);
+                F_err error;
+                auto entry = find(name, error);
+                if (!entry && error == errors::PROJECT_NOT_FOUND)
+                    log::engineError("No project is waiting for a database choice: %s", name.c_str());
                 return entry ? entry->project->databaseCandidates() : std::vector<std::string>();
             }
 
@@ -352,11 +453,12 @@ namespace fray
                 const std::string& name,
                 const DatabaseChoice& choice)
             {
-                Entry* entry = find(name);
-                if (entry == nullptr)
+                F_err lookupError;
+                auto entry = find(name, lookupError);
+                if (!entry)
                 {
                     log::engineError("No project is waiting for a database choice: %s", name.c_str());
-                    return errors::FAILED_OPEN_PROJECT;
+                    return lookupError == errors::PROJECT_AMBIGUOUS ? lookupError : errors::FAILED_OPEN_PROJECT;
                 }
                 ProjectManager* project = entry->project.get();
                 const F_err result = callOnThread(*entry, [project, choice] { return project->resolveDatabase(choice); },
@@ -371,11 +473,12 @@ namespace fray
             F_err cancelProject(
                 const std::string& name)
             {
-                Entry* entry = find(name);
-                if (entry == nullptr)
+                F_err lookupError;
+                auto entry = find(name, lookupError);
+                if (!entry)
                 {
                     log::engineError("No project is waiting for a database choice: %s", name.c_str());
-                    return errors::FAILED_OPEN_PROJECT;
+                    return lookupError == errors::PROJECT_AMBIGUOUS ? lookupError : errors::FAILED_OPEN_PROJECT;
                 }
                 ProjectManager* project = entry->project.get();
                 const F_err result = callOnThread(*entry, [project] { return project->cancelOpen(); },
@@ -385,7 +488,13 @@ namespace fray
                 Entry removed;
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
-                    const auto found = _projects.find(name);
+                    const auto found = std::find_if(_projects.begin(), _projects.end(),
+                        [project](const auto& item) { return item.second.project.get() == project; });
+                    if (found == _projects.end())
+                    {
+                        log::engineError("Cannot remove project: it is no longer registered.");
+                        return errors::FAILED_OPEN_PROJECT;
+                    }
                     forgetProject(found->second.project.get());
                     removed = std::move(found->second);
                     _projects.erase(found);
@@ -398,16 +507,20 @@ namespace fray
                 const std::string& name)
             {
                 std::lock_guard<std::mutex> lock(_mutex);
-                const auto found = _projects.find(name);
+                F_err error;
+                const auto found = lookup(name, error);
+                if (error == errors::PROJECT_AMBIGUOUS)
+                    throw std::invalid_argument("Multiple projects have this name; use the full path: " + name);
                 if (found == _projects.end() || !found->second.project->isOpen())
                     throw std::out_of_range("Project is not open: " + name);
                 return *found->second.project;
             }
 
+        private:
             // An empty target selects the most recently opened project. Completion runs on the project thread.
-            void requestCloseProject(
+            void queueProjectClose(
                 const std::string& target,
-                bool package,
+                std::function<F_err(ProjectManager&, bool&)> operation,
                 std::function<void(const std::string&, F_err, bool)> completion)
             {
                 std::unique_lock<std::mutex> lock(_mutex);
@@ -415,6 +528,7 @@ namespace fray
                     [](ProjectManager* project) { return !project->isOpen(); }), _openOrder.end());
                 ProjectManager* project = nullptr;
                 std::shared_ptr<threads::TaskQueue> queue;
+                F_err lookupError = errors::PROJECT_NOT_FOUND;
                 if (target.empty())
                 {
                     if (!_openOrder.empty())
@@ -422,9 +536,11 @@ namespace fray
                 }
                 else
                 {
-                    const auto found = _projects.find(target);
+                    const auto found = lookup(target, lookupError);
                     if (found != _projects.end() && found->second.project->isOpen())
                         project = found->second.project.get();
+                    else if (lookupError == errors::NONE)
+                        lookupError = errors::PROJECT_NOT_FOUND;
                 }
                 if (project)
                     for (auto& entry : _projects)
@@ -432,9 +548,12 @@ namespace fray
                             queue = entry.second.queue;
                 if (!project || !queue)
                 {
-                    log::engineError("Cannot close project: no matching project is open.");
+                    log::engineError("Cannot close project: %s",
+                                     lookupError == errors::PROJECT_AMBIGUOUS
+                                         ? "multiple projects have this name; use the full path."
+                                         : "no matching project is open.");
                     lock.unlock();
-                    completion(target, errors::PROJECT_NOT_FOUND, false);
+                    completion(target, lookupError, false);
                     return;
                 }
                 if (!_closingProjects.insert(project).second)
@@ -444,11 +563,11 @@ namespace fray
                     completion(target, errors::FAILED_CLOSE_PROJECT, false);
                     return;
                 }
-                if (!queue->post([this, project, queue, package, completion]
+                if (!queue->post([this, project, queue, operation = std::move(operation), completion]
                 {
                     const std::string name = project->name();
                     bool packaged = false;
-                    const F_err result = project->close(package, &packaged);
+                    const F_err result = operation(*project, packaged);
                     {
                         std::lock_guard<std::mutex> lock(_mutex);
                         _closingProjects.erase(project);
@@ -468,14 +587,33 @@ namespace fray
                 }
             }
 
+            void handleProjectMessage(
+                const message::InData& incoming,
+                ipc::IPCManager& ipc);
+
+        public:
+            void requestCloseProject(
+                const std::string& target,
+                bool package,
+                std::function<void(const std::string&, F_err, bool)> completion)
+            {
+                queueProjectClose(target, [package](ProjectManager& project, bool& packaged)
+                {
+                    return project.close(package, &packaged);
+                }, std::move(completion));
+            }
+
             F_err closeProject(
                 const std::string& name)
             {
-                Entry* entry = find(name);
-                if (entry == nullptr)
+                F_err lookupError;
+                auto entry = find(name, lookupError);
+                if (!entry && lookupError == errors::PROJECT_NOT_FOUND)
+                    entry = find(name, lookupError, true);
+                if (!entry)
                 {
                     log::engineError("Cannot close project: project is not open: %s", name.c_str());
-                    return errors::FAILED_CLOSE_PROJECT;
+                    return lookupError == errors::PROJECT_AMBIGUOUS ? lookupError : errors::FAILED_CLOSE_PROJECT;
                 }
                 ProjectManager* project = entry->project.get();
                 if (project->isOpen())
@@ -488,7 +626,13 @@ namespace fray
                 Entry removed;
                 {
                     std::lock_guard<std::mutex> lock(_mutex);
-                    const auto found = _projects.find(name);
+                    const auto found = std::find_if(_projects.begin(), _projects.end(),
+                        [project](const auto& item) { return item.second.project.get() == project; });
+                    if (found == _projects.end())
+                    {
+                        log::engineError("Cannot remove project: it is no longer registered.");
+                        return errors::FAILED_CLOSE_PROJECT;
+                    }
                     forgetProject(found->second.project.get());
                     removed = std::move(found->second);
                     _projects.erase(found);

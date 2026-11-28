@@ -64,6 +64,23 @@ int main(int argc, char** argv)
     assert(std::get<1>(retried) == fray::errors::NONE && std::get<2>(retried));
     assert(fs::is_regular_file(root / "Retry.fry") && !fs::exists(root / "Retry"));
 
+    fs::create_directories(root / "one");
+    fs::create_directories(root / "two");
+    const auto firstShared = root / "one" / "Shared";
+    const auto secondShared = root / "two" / "Shared";
+    assert(app.openProject(firstShared.string()).get() == fray::errors::NONE);
+    assert(app.openProject(secondShared.string()).get() == fray::errors::NONE);
+    assert(app.openProject((firstShared.string() + ".fry")).get() == fray::errors::PROJECT_ALREADY_OPEN);
+    bool ambiguous = false;
+    try { (void)app.project("Shared"); }
+    catch (const std::invalid_argument&) { ambiguous = true; }
+    assert(ambiguous);
+    assert(app.closeProject("Shared") == fray::errors::PROJECT_AMBIGUOUS);
+    assert(std::get<1>(close("Shared", false)) == fray::errors::PROJECT_AMBIGUOUS);
+    assert(std::get<1>(close(firstShared.string(), false)) == fray::errors::NONE);
+    assert(&app.project("Shared") == &app.project(secondShared.string()));
+    assert(app.closeProject(secondShared.string()) == fray::errors::NONE);
+
     assert(app.openProject((root / "Shutdown").string()).get() == fray::errors::NONE);
     std::promise<F_err> completed;
     auto result = completed.get_future();

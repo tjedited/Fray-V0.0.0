@@ -16,12 +16,6 @@ namespace fray
             unsupported
         };
 
-        enum class Action
-        {
-            none,
-            stop
-        };
-
         inline Destination routeMessage(
             const message::Prefix& prefix)
         {
@@ -33,7 +27,7 @@ namespace fray
             return Destination::unsupported;
         }
 
-        inline Action handleEngineMessage(
+        inline void handleEngineMessage(
             const message::InData& incomingMessage)
         {
             const auto& prefix = incomingMessage.prefix;
@@ -44,13 +38,6 @@ namespace fray
                     static_cast<unsigned long long>(header.message_id()), static_cast<unsigned long long>(header.timestamp()),
                     header.flags(), static_cast<int>(header.payload_type()), static_cast<int>(header.message_type()),
                     incomingMessage.payloadSize(), incomingMessage.frame->size());
-            if (prefix.destinationKind == PROCESS_KIND_ENGINE &&
-                prefix.senderKind == PROCESS_KIND_ELECTRON_MAIN && prefix.commandId == COMMAND_QUIT)
-            {
-                log::engineInfo("Quit requested by the UI.");
-                return Action::stop;
-            }
-            return Action::none;
         }
     }
 }

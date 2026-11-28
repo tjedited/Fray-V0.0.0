@@ -1,8 +1,9 @@
-#ifndef FRAY_MANAGER_MESSAGE_HPP
-#define FRAY_MANAGER_MESSAGE_HPP
+#ifndef FRAY_MESSAGE_HANDLER_HPP
+#define FRAY_MESSAGE_HANDLER_HPP
 
 #include "fray_manager.hpp"
 #include "ipc_manager.hpp"
+#include "project_message_handler.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -12,17 +13,17 @@ namespace fray
     inline bool FrayManager::requestPrompt(
         ipc::IPCManager& ipc,
         const PromptRequest& request,
-        std::function<void(const PromptResponse&)> callback)
+        uint64_t& requestId)
     {
         const auto blank = [](const std::string& value)
         {
             return std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isspace(ch); });
         };
-        if (!callback || blank(request.title()) || request.buttons().empty() ||
+        if (blank(request.title()) || request.buttons().empty() ||
             std::any_of(request.buttons().begin(), request.buttons().end(),
                         [&](const PromptButton& button) { return blank(button.label()); }))
         {
-            log::engineError("Cannot request prompt: title, labeled buttons and callback are required.");
+            log::engineError("Cannot request prompt: title and labeled buttons are required.");
             return false;
         }
         message::FrameOptions options{PROCESS_KIND_ELECTRON_RENDERER, COMMAND_PROMPT_REQUEST};
@@ -44,12 +45,13 @@ namespace fray
             return false;
         }
         const uint64_t id = parsed.header.message_id();
-        _pendingPrompts.emplace(id, PendingPrompt{request, std::move(callback)});
+        _pendingPrompts.emplace(id, PendingPrompt{request, {}, false});
         if (!ipc.send(frame))
         {
             _pendingPrompts.erase(id);
             return false;
         }
+        requestId = id;
         return true;
     }
 
@@ -58,6 +60,14 @@ namespace fray
         ipc::IPCManager& ipc)
     {
         const auto& prefix = incoming.prefix;
+        if (prefix.commandId == COMMAND_QUIT &&
+            prefix.destinationKind == PROCESS_KIND_ENGINE &&
+            prefix.senderKind == PROCESS_KIND_ELECTRON_MAIN)
+        {
+            log::engineInfo("Quit requested by the UI.");
+            ipc.stop();
+            return;
+        }
         if (prefix.commandId == COMMAND_PROMPT_RESPONSE)
         {
             PromptResponse response;
@@ -72,7 +82,7 @@ namespace fray
             }
             std::lock_guard<std::mutex> lock(_promptMutex);
             const auto found = _pendingPrompts.find(response.request_id());
-            if (found == _pendingPrompts.end())
+            if (found == _pendingPrompts.end() || found->second.completed)
             {
                 log::engineError("Cannot handle prompt response: unknown request.");
                 return;
@@ -87,55 +97,13 @@ namespace fray
                 log::engineError("Cannot handle prompt response: invalid choice.");
                 return;
             }
-            const auto callback = found->second.callback;
-            if (!postApplication([callback, response] { callback(response); }))
-            {
-                log::engineError("Cannot handle prompt response: application thread is shutting down.");
-                return;
-            }
-            _pendingPrompts.erase(found);
+            found->second.response = std::move(response);
+            found->second.completed = true;
             return;
         }
         if (prefix.commandId == COMMAND_CLOSE_PROJECT)
         {
-            if (prefix.senderKind != PROCESS_KIND_ELECTRON_MAIN &&
-                prefix.senderKind != PROCESS_KIND_ELECTRON_RENDERER)
-            {
-                log::engineError("Cannot close project: unsupported sender.");
-                return;
-            }
-            const auto sendResult = [&ipc, sender = prefix.senderKind, senderId = prefix.senderId,
-                                     requestId = incoming.header.message_id()](const std::string& name, F_err result,
-                                                                              bool packaged)
-            {
-                ProjectCloseResult payload;
-                payload.set_request_id(requestId);
-                payload.set_name(name);
-                payload.set_success(result == errors::NONE);
-                payload.set_packaged(packaged);
-                if (result == errors::PROJECT_NOT_FOUND)
-                    payload.set_error("No matching project is open.");
-                else if (result != errors::NONE)
-                    payload.set_error("Could not close the project. See the Engine log for details.");
-                message::FrameOptions options{sender, COMMAND_PROJECT_CLOSE_RESULT, senderId};
-                options.payload = payload.SerializeAsString();
-                options.payloadType = PAYLOAD_TYPE_PROTOBUF;
-                options.messageType = MESSAGE_TYPE_PROJECT_CLOSE_RESULT;
-                ipc.sendBuilt(options);
-            };
-            ProjectCloseRequest request;
-            const std::string target = incoming.header.target_project();
-            if (prefix.destinationKind != PROCESS_KIND_ENGINE ||
-                incoming.header.payload_type() != PAYLOAD_TYPE_PROTOBUF ||
-                incoming.header.message_type() != MESSAGE_TYPE_PROJECT_CLOSE_REQUEST ||
-                !request.ParseFromArray(incoming.payload(), static_cast<int>(incoming.payloadSize())) ||
-                (!target.empty() && !ProjectManager::validProjectName(target)))
-            {
-                log::engineError("Cannot close project: invalid request.");
-                sendResult(target, errors::INVALID_MESSAGE, false);
-                return;
-            }
-            requestCloseProject(target, request.package(), sendResult);
+            handleProjectMessage(incoming, ipc);
             return;
         }
         if (prefix.commandId == COMMAND_CREATE_PROJECT)
@@ -162,7 +130,7 @@ namespace fray
                 else if (result == errors::PROJECT_BOTH_EXIST || result == errors::PROJECT_CONFLICT)
                     payload.set_status(PROJECT_BOTH_CONFLICT);
                 else if (result == errors::PROJECT_ALREADY_OPEN)
-                    payload.set_error("A project with this name is already open.");
+                    payload.set_error("This project is already open.");
                 else if (result == errors::PROJECT_NOT_FOUND)
                     payload.set_error("The selected project no longer exists.");
                 else if (result == errors::INVALID_PROJECT_DATABASE)

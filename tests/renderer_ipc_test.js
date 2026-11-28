@@ -205,6 +205,14 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
         assert.equal(outgoing.header.messageId, '18446744073709551615');
         assert.deepEqual(outgoing.payload, Buffer.from([0, 1, 128, 255]));
 
+        child.stdin.write('close-project\npackage-project\n');
+        for (let attempt = 0; attempt < 100 && received.filter((frame) =>
+            frame.prefix.commandId === message.Command.COMMAND_CLOSE_PROJECT).length < 2; attempt++)
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.equal(received.filter((frame) =>
+            frame.prefix.commandId === message.Command.COMMAND_CLOSE_PROJECT).length, 2,
+        'Renderer must send another project command without waiting for a result.');
+
         const protobuf = require('../Electron/node_modules/protobufjs');
         const schema = protobuf.loadSync(path.join(__dirname, '../Schemas/fray.proto'));
         const promptRequest = schema.lookupType('fray.PromptRequest');
@@ -266,7 +274,7 @@ for (const mode of ['development', 'production']) test(`real ${mode} renderer ex
         const [code] = await exited;
         assert.equal(code, 0, output);
         assert.match(output, /STATE:{"state":"stopped","threads":\[\]}/);
-        assert.ok(output.indexOf('STATE:{"state":"stopped"') < output.indexOf('Telling the engine to quit.'), output);
+        assert.ok(output.indexOf('Telling the engine to quit.') < output.indexOf('STATE:{"state":"stopped"'), output);
         assert.equal(received.at(-1).prefix.commandId, message.Command.COMMAND_QUIT);
     } finally {
         if (child && child.exitCode === null && child.signalCode === null) child.kill();
@@ -504,6 +512,25 @@ test('real Engine and renderer exchange frames and project requests', { timeout:
         await waitForUi('Project closed');
         assert.ok((await fs.stat(path.join(createHere, 'CreateHere.sqlite'))).isFile());
         assert.equal(await fs.stat(`${createHere}.fry`).then(() => true, () => false), false);
+
+        const sameNamePaths = ['First', 'Second'].map((parent) => path.join(projectDirectory, parent, 'Shared'));
+        for (const project of sameNamePaths) {
+            await fs.mkdir(path.dirname(project));
+            electron.stdin.write(`new-project ${encoded([project])}\n`);
+            await waitForUi(project);
+        }
+        async function closeTarget(target, success, error) {
+            electron.stdin.write(`close-target ${Buffer.from(target).toString('base64')}\n`);
+            const result = JSON.stringify({ target, success, error });
+            await Promise.race([
+                waitFor(() => electronOutput.includes(`CLOSE_TARGET_RESULT:${result}\n`), `close result for ${target}`),
+                ...failures,
+            ]);
+        }
+        await closeTarget('Shared', false, 'Multiple projects have this name. Use the full path.');
+        await closeTarget(sameNamePaths[0], true, '');
+        await closeTarget('Shared', true, '');
+
         electron.stdin.write('send\n');
         await Promise.race([
             waitFor(() => /command=77 sender=Renderer .*message_id=18446744073709551615 .*payload_bytes=4 /.test(engineOutput),
@@ -532,7 +559,7 @@ test('real Engine and renderer exchange frames and project requests', { timeout:
     }
 });
 
-test('renderer that starts before the Engine link announces itself once the link is up', { timeout: 30000 }, async () => {
+test('renderer and Main exchange readiness before the Engine link and reannounce on connection', { timeout: 30000 }, async () => {
     const vite = await import(pathToFileURL(require.resolve('../Electron/node_modules/vite')).href);
     const server = await vite.createServer({
         configFile: path.join(__dirname, '../Electron/vite.config.ts'),
@@ -564,6 +591,8 @@ test('renderer that starts before the Engine link announces itself once the link
             assert.ok(condition(), `Timed out waiting for ${description}:\n${output}`);
         };
         await until(() => output.includes('STATE:{"state":"ready"'), 'the renderer to be ready');
+        await until(() => output.includes('Renderer received frame: command=3') &&
+            output.includes('sender=Electron Main'), 'Main readiness without an Engine connection');
         const received = [];
         let pending = Buffer.alloc(0);
         tcp.on('connection', (connection) => {

@@ -65,6 +65,7 @@ export interface IncomingMessage<TPayload> {
 export type RendererState = 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed';
 
 export type ProjectSelection = { path: string; kind: 'archive' | 'folder' };
+export type ProjectPathResult<T> = { selection: T | null; error?: string };
 
 /** The API the preload script exposes to the renderer as `window.frayBridge`. */
 export interface FrayBridge {
@@ -75,8 +76,11 @@ export interface FrayBridge {
   /** Returns a function that removes the handler. */
   onShutdown(handler: () => void): () => void;
   onNewProject(handler: () => void): () => void;
-  chooseNewProjectPath(previousPath?: string): Promise<string | null>;
+  chooseNewProjectPath(previousPath?: string): void;
+  onNewProjectPath(handler: (result: ProjectPathResult<string>) => void): () => void;
   onOpenProject(handler: () => void): () => void;
-  chooseOpenProjectPath(kind: 'archive' | 'folder' | 'both'): Promise<ProjectSelection | null>;
+  chooseOpenProjectPath(kind: 'archive' | 'folder' | 'both'): void;
+  onOpenProjectPath(handler: (result: ProjectPathResult<ProjectSelection>) => void): () => void;
   onCloseProject(handler: (packageProject: boolean) => void): () => void;
 }
+export type PromptResult = { value: string | null; error?: string };

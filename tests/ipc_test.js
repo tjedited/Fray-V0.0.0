@@ -7,11 +7,14 @@ const { once } = require('node:events');
 const EventEmitter = require('node:events');
 const Module = require('node:module');
 const { test } = require('node:test');
-const { IPCManager, TCPClient } = require('../Electron/dist-electron/ipc_manager');
-const { ThreadManager } = require('../Electron/dist-electron/thread_manager');
-const message = require('../Electron/dist-electron/message');
-const { createFrameBuilder } = require('../Electron/dist-electron/shared/frame_builder');
-const log = require('../Electron/dist-electron/log_manager');
+const mainDirectory = process.env.FRAY_TEST_ELECTRON_MAIN
+    ? path.dirname(process.env.FRAY_TEST_ELECTRON_MAIN)
+    : path.join(__dirname, '../Electron/dist-electron');
+const { IPCManager, TCPClient } = require(path.join(mainDirectory, 'ipc_manager'));
+const { ThreadManager } = require(path.join(mainDirectory, 'thread_manager'));
+const message = require(path.join(mainDirectory, 'message'));
+const { createFrameBuilder } = require(path.join(mainDirectory, 'shared/frame_builder'));
+const log = require(path.join(mainDirectory, 'log_manager'));
 
 function frame(commandId, payload = Buffer.alloc(0), id = 1, destination = message.ProcessKind.PROCESS_KIND_ENGINE) {
     return message.buildFrame({
@@ -153,6 +156,47 @@ test('IPC retries a refused connection without stopping its workers', { timeout:
         assert.deepEqual(threads.runningNames().sort(), ['electron-messages', 'network']);
     } finally {
         await client.close();
+        await new Promise((resolve) => server.close(resolve));
+    }
+});
+
+test('Main and Renderer keep routing frames after the Engine disconnects', { timeout: 10000 }, async () => {
+    const server = net.createServer();
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const connection = once(server, 'connection');
+    const threads = new ThreadManager();
+    const client = new IPCManager('127.0.0.1', server.address().port, threads);
+    const connected = once(client, 'connected');
+    const [socket] = await connection;
+    try {
+        await connected;
+        const disconnected = once(client, 'disconnected');
+        socket.destroy();
+        await disconnected;
+        await waitUntil(() => !threads.runningNames().includes('network'), 'network worker exit');
+        assert.ok(threads.runningNames().includes('electron-messages'));
+
+        const renderer = message.ProcessKind.PROCESS_KIND_ELECTRON_RENDERER;
+        const main = message.ProcessKind.PROCESS_KIND_ELECTRON_MAIN;
+        const rendererFrame = (commandId) => message.buildFrame({
+            senderKind: renderer, destinationKind: main, commandId,
+        }, { messageId: 1 });
+        const ready = once(client, 'peer-ready');
+        client.routeRendererFrame(rendererFrame(message.Command.COMMAND_READY));
+        assert.equal((await ready)[0], renderer);
+
+        const receivedByRenderer = once(client, 'renderer-frame');
+        client.send(frame(message.Command.COMMAND_TEST, Buffer.from('to renderer'), 2, renderer));
+        const [rendererBytes] = await receivedByRenderer;
+        assert.equal(message.parseFrame(Buffer.from(rendererBytes)).payload.toString(), 'to renderer');
+
+        const receivedByMain = once(client, 'message');
+        client.routeRendererFrame(rendererFrame(message.Command.COMMAND_TEST));
+        assert.equal((await receivedByMain)[0].prefix.commandId, message.Command.COMMAND_TEST);
+    } finally {
+        await client.close();
+        socket.destroy();
         await new Promise((resolve) => server.close(resolve));
     }
 });
@@ -366,17 +410,22 @@ test('frames over the maximum size are refused when built or parsed', () => {
         length: message.MAX_FRAME_LENGTH + 1, headerLength: 1 })), /maximum/);
 });
 
-test('Electron main announces readiness and sends a framed quit', { timeout: 10000 }, async () => {
+for (const rendererResponds of [true, false]) test(
+    `Electron main sends quit independently and ${rendererResponds ? 'accepts renderer shutdown' : 'forces a hung renderer closed'}`,
+    { timeout: 10000 }, async () => {
     const server = net.createServer();
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     const connection = once(server, 'connection');
     const app = new EventEmitter();
     const ipcMain = new EventEmitter();
+    ipcMain.handle = () => {};
     app.whenReady = () => Promise.resolve();
     let resolveQuit;
+    let quitCalled = false;
     const quitFinished = new Promise((resolve) => { resolveQuit = resolve; });
     app.quit = () => {
+        quitCalled = true;
         app.emit('before-quit', { preventDefault() {} });
         resolveQuit();
     };
@@ -392,7 +441,9 @@ test('Electron main announces readiness and sends a framed quit', { timeout: 100
             this.sent = [];
             this.webContents.send = (...args) => this.sent.push(args);
         }
-        isDestroyed() { return false; }
+        isDestroyed() { return this.destroyed === true; }
+        destroy() { this.destroyed = true; this.emit('closed'); }
+        setWindowButtonVisibility() {}
         loadURL(url) { windowUrl = url; }
     }
     const originalLoad = Module._load;
@@ -406,19 +457,24 @@ test('Electron main announces readiness and sends a framed quit', { timeout: 100
     };
     process.env.FRAY_ENGINE_PORT = String(server.address().port);
     Module._load = function (request, ...args) {
-        if (request === 'electron') return { app, BrowserWindow, ipcMain };
+        if (request === 'electron') return {
+            app, BrowserWindow, ipcMain,
+            Menu: { buildFromTemplate: (menu) => menu, setApplicationMenu() {} },
+        };
         return originalLoad.call(this, request, ...args);
     };
     try {
-        require('../Electron/dist-electron/main');
+        delete require.cache[require.resolve(path.join(mainDirectory, 'main'))];
+        require(path.join(mainDirectory, 'main'));
     } finally {
         Module._load = originalLoad;
         if (originalPort === undefined) delete process.env.FRAY_ENGINE_PORT;
         else process.env.FRAY_ENGINE_PORT = originalPort;
     }
     const [socket] = await connection;
-    assert.equal(require.resolve('../Electron'), require.resolve('../Electron/dist-electron/main'));
-    assert.equal(windowOptions.webPreferences.preload, path.join(__dirname, '../Electron/dist-electron/preload.js'));
+    if (!process.env.FRAY_TEST_ELECTRON_MAIN)
+        assert.equal(require.resolve('../Electron'), require.resolve(path.join(mainDirectory, 'main')));
+    assert.equal(windowOptions.webPreferences.preload, path.join(mainDirectory, 'preload.js'));
     assert.equal(fs.existsSync(windowOptions.webPreferences.preload), true);
     assert.equal(windowUrl, 'http://localhost:5173');
     let data = Buffer.alloc(0);
@@ -484,17 +540,19 @@ test('Electron main announces readiness and sends a framed quit', { timeout: 100
         assert.equal(logged[1], 'Engine');
         app.emit('before-quit', { preventDefault() {} });
         assert.equal(win.sent.at(-1)[0], 'fray:shutdown');
-        const framesBeforeQuit = frames.length;
-        ipcMain.emit('fray:renderer-state', { sender: win.webContents },
-            { state: 'stopped', threads: ['renderer-messages'] });
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        assert.equal(frames.length, framesBeforeQuit, 'Engine must not be told to quit while renderer threads are running.');
-        ipcMain.emit('fray:renderer-state', { sender: win.webContents },
-            { state: 'stopped', threads: [] });
         await complete;
         assert.equal(frames.at(-1).prefix.commandId, message.Command.COMMAND_QUIT);
         assert.equal(frames.at(-1).payload.length, 0);
+        assert.equal(quitCalled, false, 'Main gives Renderer time to stop.');
+        if (rendererResponds) {
+            ipcMain.emit('fray:renderer-state', { sender: win.webContents },
+                { state: 'stopped', threads: ['renderer-messages'] });
+            assert.equal(quitCalled, false);
+            ipcMain.emit('fray:renderer-state', { sender: win.webContents },
+                { state: 'stopped', threads: [] });
+        }
         await quitFinished;
+        assert.equal(win.isDestroyed(), !rendererResponds);
     } finally {
         log.electronInfo = originalInfo;
         socket.destroy();
